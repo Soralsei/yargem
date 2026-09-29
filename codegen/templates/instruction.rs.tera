@@ -12,7 +12,7 @@ const ILLEGAL: Instruction = Instruction {
     cycles: Cycles::Unconditional(4),
 };
 
-pub async fn execute_unprefixed(cpu: &CpuTask, opcode: u8) {
+pub async fn execute_unprefixed(cpu: &mut CpuTask, opcode: u8) {
     match opcode {
 {%- for a in unprefixed %}
         0x{{ a.code }} =>
@@ -83,7 +83,7 @@ pub async fn execute_unprefixed(cpu: &CpuTask, opcode: u8) {
     }
 }
 
-pub async fn execute_prefixed(cpu: &CpuTask, opcode: u8) {
+pub async fn execute_prefixed(cpu: &mut CpuTask, opcode: u8) {
     match opcode {
 {%- for a in prefixed %}
         0x{{ a.code }} =>

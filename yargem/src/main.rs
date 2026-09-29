@@ -1,10 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::OutputCallbackInfo;
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
-use yargem::audio;
 use yargem::audio::resampler::{LinearResampler, StereoFrame, StereoResampler};
 
-use std::cell::OnceCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
@@ -116,11 +114,9 @@ fn main() {
 
                 for frame in data.chunks_exact_mut(channels) {
                     let resampled = resampler.resample(|| {
-                        audio_rx.pop().ok().and_then(|s| {
-                            Some(StereoFrame {
-                                left: s[0],
-                                right: s[1],
-                            })
+                        audio_rx.pop().ok().map(|s| StereoFrame {
+                            left: s[0],
+                            right: s[1],
                         })
                     });
 
@@ -136,7 +132,7 @@ fn main() {
                     }
                 }
             },
-            move |err| {},
+            move |_err| {},
             None,
         )
         .expect("Failed to create output stream");

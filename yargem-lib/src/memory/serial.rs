@@ -1,10 +1,14 @@
 use std::io::Write;
-use std::{cell::RefCell, convert::Infallible, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    convert::Infallible,
+    rc::Rc,
+};
 
 use super::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu};
-use crate::clock::Cpu;
+use crate::clock::{signal, Cpu, Listener, Raiser};
 use crate::{
-    clock::{Cycles, Timeline, M_CYCLE},
+    clock::{Cycles, Timeline},
     cpu::interrupt::InterruptRequest,
     is_bit_set,
 };
@@ -56,37 +60,33 @@ impl ByteSink for LogSink {
 pub struct Serial<S: ByteSink> {
     sink: S,
     state: RefCell<SerialState>,
+    raiser: Raiser,
+    /// Taken by the task when it starts: it is the only consumer.
+    listener: Cell<Option<Listener>>,
 }
 
 impl<S: ByteSink> Serial<S> {
     pub fn new(interrupt_request: InterruptRequest, sink: S) -> Self {
+        let (raiser, listener) = signal();
         Self {
             sink,
             state: RefCell::new(SerialState::new(interrupt_request)),
+            raiser,
+            listener: Cell::new(Some(listener)),
         }
     }
 
     pub async fn task(this: Rc<Serial<S>>, timeline: Timeline<Cpu>) -> Infallible {
+        let mut writes = this.listener.take().expect("serial task spawned twice");
         loop {
             // Idle until software arms a transfer. No borrow may straddle an
             // await: the SC write handler takes the same cell.
-            let driving = loop {
-                let armed = {
+            timeline
+                .after(writes.until(|| {
                     let state = this.state.borrow();
-                    state.transfer_enable.then_some(state.clock_select)
-                };
-                match armed {
-                    Some(driving) => break driving,
-                    None => timeline.wait(M_CYCLE as Cycles).await,
-                }
-            };
-
-            // Only the master supplies the clock. As slave the peer does, and
-            // nothing here can time it, so the transfer just stays pending.
-            if !driving {
-                timeline.wait(M_CYCLE as Cycles).await;
-                continue;
-            }
+                    state.transfer_enable && state.clock_select
+                }))
+                .await;
 
             timeline.wait(CYCLES_TO_SEND).await;
             this.state.borrow_mut().complete_transfer(&this.sink);
@@ -143,7 +143,9 @@ impl<S: ByteSink> MemoryHandler for Serial<S> {
     }
 
     fn write(&self, _: &Mmu, address: u16, value: u8) -> MemoryWrite {
-        self.state.borrow_mut().write(address, value)
+        let write = self.state.borrow_mut().write(address, value);
+        self.raiser.raise();
+        write
     }
 }
 

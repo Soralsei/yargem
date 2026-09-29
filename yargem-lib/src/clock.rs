@@ -3,8 +3,9 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::ptr;
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 /// Length of a machine cycle, the granularity at which the CPU touches the bus.
 pub const M_CYCLE: u64 = 4;
@@ -19,10 +20,19 @@ pub struct Cpu;
 #[derive(Clone)]
 pub struct Fixed;
 
-pub(crate) trait TimeDomain {}
+pub(crate) trait TimeDomain {
+    const ID: usize;
+    const CYCLE_ALIGNMENT: Cycles;
+}
 
-impl TimeDomain for Cpu {}
-impl TimeDomain for Fixed {}
+impl TimeDomain for Cpu {
+    const ID: usize = 0;
+    const CYCLE_ALIGNMENT: Cycles = M_CYCLE;
+}
+impl TimeDomain for Fixed {
+    const ID: usize = 1;
+    const CYCLE_ALIGNMENT: Cycles = 1;
+}
 
 /// A task's view of time. Holds the clock's counter :
 /// the clock owns the tasks, so an `Rc<Time>` in a task would be a cycle.
@@ -39,18 +49,16 @@ impl<D: TimeDomain> Timeline<D> {
     /// Suspend until `n` more cycles pass. Cumulative, not `now + n`: a tick can
     /// carry several M-cycles, and a task must catch up rather than drop the
     /// overshoot.
-    pub fn wait(&self, n: Cycles) -> Wait {
-        let wake_at = self.cursor.get().wrapping_add(n);
-        self.cursor.set(wake_at);
-        Wait {
-            now: self.now.clone(),
-            at: wake_at,
-        }
+    pub fn wait(&self, n: Cycles) -> Wait<'_, D> {
+        debug_assert!(
+            self.now.get().saturating_sub(self.cursor.get()) < D::CYCLE_ALIGNMENT,
+            "stale timeline: untimed wait without `after`?"
+        );
+        self.wait_until(self.cursor.get() + n)
     }
 
-    /// Cycles elapsed on this task's clock since power-on.
-    pub fn now(&self) -> Cycles {
-        self.now.get()
+    fn wait_until(&self, at: Cycles) -> Wait<'_, D> {
+        Wait { timeline: self, at }
     }
 
     /// The cycle this task has advanced itself to. Trails `now` while catching up.
@@ -69,95 +77,268 @@ impl<D: TimeDomain> Timeline<D> {
         }
     }
 
-    /// Absorb a branch's progress back into this timeline.
-    pub fn join(&self, branch: &Timeline<D>) {
-        let furthest = self.cursor.get().max(branch.cursor.get());
-        self.cursor.set(furthest);
+    fn get_align(&self) -> Cycles {
+        let cursor = self.cursor.get();
+        let dt = self.now.get().saturating_sub(cursor);
+
+        let step_size = D::CYCLE_ALIGNMENT;
+        let steps = dt.div_ceil(step_size);
+
+        cursor + steps * step_size
+    }
+
+    pub fn realign(&self) {
+        self.cursor.set(self.get_align());
+    }
+
+    /// Wait for an event that doesn't track time, then resume on this domain's
+    /// grid: at the first grid point at or after the event, as if the task had
+    /// been polling for it every step.
+    pub async fn after<F>(&self, event: Untimed<F>)
+    where
+        F: Future<Output = ()>,
+    {
+        event.raw_fut().await;
+
+        self.wait_until(self.get_align()).await;
     }
 }
 
-pub(crate) trait TimelineType {
+pub(crate) trait FromTask {
     fn build(cpu: &CpuClock, fixed: &FixedClock) -> Self;
 }
 
-impl TimelineType for Timeline<Cpu> {
+impl FromTask for Timeline<Cpu> {
     fn build(cpu: &CpuClock, _fixed: &FixedClock) -> Self {
         cpu.timeline()
     }
 }
 
-impl TimelineType for Timeline<Fixed> {
+impl FromTask for Timeline<Fixed> {
     fn build(_cpu: &CpuClock, fixed: &FixedClock) -> Self {
         fixed.timeline()
     }
 }
 
-impl TimelineType for (Timeline<Cpu>, Timeline<Fixed>) {
+impl FromTask for (Timeline<Cpu>, Timeline<Fixed>) {
     fn build(cpu: &CpuClock, fixed: &FixedClock) -> Self {
         (cpu.timeline(), fixed.timeline())
     }
 }
 
-impl TimelineType for (Timeline<Fixed>, Timeline<Cpu>) {
+impl FromTask for (Timeline<Fixed>, Timeline<Cpu>) {
     fn build(cpu: &CpuClock, fixed: &FixedClock) -> Self {
         (fixed.timeline(), cpu.timeline())
     }
 }
 
-/// `wait` advances the task's position as a side effect, so dropping one
-/// un-awaited skews every later deadline. `Future`'s own `must_use` does not
-/// cover a named return type.
+impl FromTask for () {
+    fn build(_: &CpuClock, _: &FixedClock) -> Self {}
+}
+
+struct Slot {
+    wake_at: [Cell<Cycles>; 2],
+    notified: Cell<bool>,
+}
+
+impl Slot {
+    pub fn new() -> Self {
+        Self {
+            wake_at: [const { Cell::new(Cycles::MAX) }; 2],
+            notified: Cell::new(true),
+        }
+    }
+}
+
+fn slot_of<'a>(ctx: &'a Context<'_>) -> Option<&'a Slot> {
+    let waker = ctx.waker();
+    if ptr::eq(waker.vtable(), &VTABLE) {
+        return Some(unsafe { &*(waker.data() as *const Slot) });
+    }
+    None
+}
+
 #[must_use = "does nothing unless awaited"]
-pub struct Wait {
-    now: Rc<Cell<Cycles>>,
+pub struct Wait<'a, D: TimeDomain> {
+    timeline: &'a Timeline<D>,
     at: Cycles,
 }
 
-impl Future for Wait {
+impl<D> Future for Wait<'_, D>
+where
+    D: TimeDomain,
+{
     type Output = ();
-    fn poll(self: Pin<&mut Self>, _: &mut Context) -> Poll<()> {
-        if self.now.get() >= self.at {
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<()> {
+        if self.timeline.now.get() >= self.at {
+            let cursor = &self.timeline.cursor;
+            cursor.set(cursor.get().max(self.at));
             Poll::Ready(())
         } else {
+            if let Some(slot) = slot_of(ctx) {
+                let wake_at = &slot.wake_at[D::ID];
+                wake_at.set(wake_at.get().min(self.at));
+            }
             Poll::Pending
         }
     }
 }
 
-#[derive(Clone, Default)]
-pub struct Pulse(Rc<Cell<u32>>);
+#[derive(Clone)]
+pub struct Raiser(Rc<Cell<Option<Waker>>>);
 
-impl Pulse {
-    pub fn new() -> Self {
-        Self(Rc::new(Cell::new(0u32)))
-    }
-
+impl Raiser {
     pub fn raise(&self) {
-        self.0.set(self.0.get() + 1);
-    }
-
-    #[must_use = "does nothing unless awaited"]
-    pub fn next(&self) -> impl Future<Output = ()> + '_ {
-        std::future::poll_fn(|_| match self.0.get() {
-            0 => Poll::Pending,
-            n => {
-                self.0.set(n - 1);
-                Poll::Ready(())
-            }
-        })
+        if let Some(waker) = self.0.take() {
+            waker.wake();
+        }
     }
 }
 
-pub struct NotifyHandle(Rc<Cell<bool>>);
+pub struct Listener(Rc<Cell<Option<Waker>>>);
 
-impl NotifyHandle {
-    pub fn notify(&self) {
-        self.0.set(true);
+impl Listener {
+    pub fn until<F: Fn() -> bool>(&mut self, predicate: F) -> Untimed<Until<'_, F>> {
+        let until = Until {
+            listener: self,
+            predicate,
+        };
+        Untimed { fut: until }
     }
+}
+
+pub fn signal() -> (Raiser, Listener) {
+    let waker = Rc::new(Cell::new(None));
+    (Raiser(waker.clone()), Listener(waker))
+}
+
+#[must_use = "does nothing unless awaited"]
+pub struct Until<'a, F: Fn() -> bool> {
+    listener: &'a Listener,
+    predicate: F,
+}
+
+impl<'a, F> Until<'a, F>
+where
+    F: Fn() -> bool,
+{
+    fn register(&self, waker: &Waker) {
+        let new = match self.listener.0.take() {
+            Some(old) if old.will_wake(waker) => old,
+            _ => waker.clone(),
+        };
+        self.listener.0.set(Some(new));
+    }
+}
+
+impl<'a, F> Future for Until<'a, F>
+where
+    F: Fn() -> bool,
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if (self.predicate)() {
+            Poll::Ready(())
+        } else {
+            self.register(cx.waker());
+            Poll::Pending
+        }
+    }
+}
+
+impl<F: Fn() -> bool> Drop for Until<'_, F> {
+    fn drop(&mut self) {
+        self.listener.0.take();
+    }
+}
+
+pub struct Untimed<F: Future> {
+    fut: F,
+}
+
+impl<F: Future> Untimed<F> {
+    pub fn raw_fut(self) -> F {
+        self.fut
+    }
+}
+
+#[derive(Clone)]
+pub struct EdgeRaiser {
+    pending: Rc<Cell<bool>>,
+    raiser: Raiser,
+}
+
+impl EdgeRaiser {
+    pub fn raise(&self) {
+        debug_assert!(
+            !self.pending.get(),
+            "at most one pending edge in EdgeRaiser/Listener"
+        );
+        self.pending.set(true);
+        self.raiser.raise();
+    }
+}
+
+pub struct EdgeListener {
+    pending: Rc<Cell<bool>>,
+    listener: Listener,
+}
+
+impl EdgeListener {
+    pub fn next(&mut self) -> Untimed<Until<'_, impl Fn() -> bool + use<'_>>> {
+        let pending = &self.pending;
+        self.listener.until(|| pending.take())
+    }
+}
+
+pub fn edge() -> (EdgeRaiser, EdgeListener) {
+    let pending = Rc::new(Cell::new(false));
+    let (raiser, listener) = signal();
+    (
+        EdgeRaiser {
+            pending: pending.clone(),
+            raiser,
+        },
+        EdgeListener { pending, listener },
+    )
 }
 
 /// Tasks never complete: `Infallible` makes that checked rather than conventional.
-struct Task(BoxFuture<Infallible>);
+struct Task {
+    fut: BoxFuture<Infallible>,
+    slot: Rc<Slot>,
+    waker: Waker,
+}
+
+impl Task {
+    pub fn new(fut: BoxFuture<Infallible>, slot: Rc<Slot>, waker: Waker) -> Self {
+        Self { fut, slot, waker }
+    }
+
+    pub fn should_poll(&self, now: [Cycles; 2]) -> bool {
+        self.slot.notified.get()
+            || self
+                .slot
+                .wake_at
+                .iter()
+                .zip(now)
+                .any(|(wake, now)| wake.get() <= now)
+    }
+
+    pub fn poll(&mut self) {
+        self.slot.notified.set(false);
+        self.slot
+            .wake_at
+            .iter()
+            .for_each(|wake| wake.set(Cycles::MAX));
+
+        let _ = self
+            .fut
+            .as_mut()
+            .poll(&mut Context::from_waker(&self.waker));
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 
@@ -210,6 +391,9 @@ impl Counter {
     fn resume(&self) {
         self.stopped.set(false);
     }
+    fn stopped(&self) -> bool {
+        self.stopped.get()
+    }
 }
 
 /// Dot clock. Never changes rate; the PPU and APU are clocked to it.
@@ -219,11 +403,14 @@ impl FixedClock {
     pub fn new() -> Rc<Self> {
         Rc::new(Self(Counter::new()))
     }
-    pub fn tick(&self) {
-        self.0.advance(1);
+    fn tick(&self, ticks: Cycles) {
+        self.0.advance(ticks);
     }
-    pub fn timeline(&self) -> Timeline<Fixed> {
+    fn timeline(&self) -> Timeline<Fixed> {
         self.0.timeline()
+    }
+    pub fn now(&self) -> Cycles {
+        self.0.now()
     }
     pub fn stop(&self) {
         self.0.stop();
@@ -231,16 +418,14 @@ impl FixedClock {
     pub fn resume(&self) {
         self.0.resume();
     }
-    pub fn now_cell(&self) -> Rc<Cell<Cycles>> {
-        self.0.now.clone()
+    fn stopped(&self) -> bool {
+        self.0.stopped()
     }
 }
 
-/// CPU clock. Doubles in CGB double speed, and carries the state derived from
-/// it: the divider, and the speed switch that changes its own rate.
+/// CPU clock. Doubles in CGB double speed
 pub struct CpuClock {
     counter: Counter,
-    div_epoch: Cell<Cycles>,
     speed: Cell<Speed>,
     switch_armed: Cell<bool>,
 }
@@ -249,38 +434,31 @@ impl CpuClock {
     pub fn new() -> Rc<Self> {
         Rc::new(Self {
             counter: Counter::new(),
-            div_epoch: Cell::new(0),
             speed: Cell::default(),
-            switch_armed: Cell::new(false),
+            switch_armed: false.into(),
         })
     }
 
-    pub fn now_cell(&self) -> Rc<Cell<Cycles>> {
-        self.counter.now.clone()
+    fn tick(&self, ticks: Cycles) {
+        self.counter.advance(ticks << self.speed.get() as u8);
     }
-
-    pub fn tick(&self) {
-        self.counter.advance(1 << self.speed.get() as u8);
-    }
-    pub fn timeline(&self) -> Timeline<Cpu> {
+    fn timeline(&self) -> Timeline<Cpu> {
         self.counter.timeline()
     }
     pub fn resume(&self) {
         self.counter.resume();
     }
 
-    /// STOP and the speed-switch stall both land here. Freezing the counter
-    /// freezes DIV with it, since DIV is derived from it.
-    pub fn stop(&self) {
-        self.counter.stop();
-        self.reset_div();
+    pub fn now(&self) -> Cycles {
+        self.counter.now()
     }
 
-    pub fn div(&self) -> u16 {
-        self.counter.now().wrapping_sub(self.div_epoch.get()) as u16
+    /// STOP and the speed-switch stall both land here.
+    pub fn stop(&self) {
+        self.counter.stop();
     }
-    pub fn reset_div(&self) {
-        self.div_epoch.set(self.counter.now());
+    fn stopped(&self) -> bool {
+        self.counter.stopped()
     }
 
     pub fn arm(&self, value: bool) {
@@ -308,6 +486,13 @@ struct Executor {
     tasks: Vec<Task>,
 }
 
+static VTABLE: RawWakerVTable = RawWakerVTable::new(
+    Executor::waker_clone,
+    Executor::wake,
+    Executor::wake_by_ref,
+    Executor::waker_drop,
+);
+
 impl Executor {
     pub fn new() -> Self {
         Self {
@@ -318,19 +503,70 @@ impl Executor {
     /// Polled once here so the task reaches its first `await` at the current
     /// cycle rather than the next tick's.
     pub fn spawn(&mut self, future: impl Future<Output = Infallible> + 'static) {
-        let mut future = Box::pin(future);
-        let _ = future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()));
-        self.tasks.push(Task(future));
+        let future = Box::pin(future);
+
+        let slot = Rc::new(Slot::new());
+
+        // SAFETY: The waker should NEVER cross a thread, as it is implemented
+        // with a plain Rc instead of an Arc. Using it in a multithreaded context
+        // would risk race conditions on the refcount which would lead to memory leaks
+        let raw_waker = RawWaker::new(Rc::into_raw(slot.clone()).cast(), &VTABLE);
+        let waker = unsafe { Waker::from_raw(raw_waker) };
+
+        let mut task = Task::new(future, slot, waker);
+
+        task.poll();
+
+        self.tasks.push(task);
     }
 
-    /// Every task, in spawn order, unconditionally. Order is savestate contract.
-    pub fn poll(&mut self) {
-        let mut cx = Context::from_waker(Waker::noop());
+    /// Every awoken task in a previous poll (if it was awoken by a previous task in the vector)
+    /// or a previous clock (if it was awoken by a task later in the vector), in spawn order.
+    /// Order is savestate contract.
+    pub fn poll(&mut self, now: [Cycles; 2]) {
         for task in self.tasks.iter_mut() {
-            let _ = task.0.as_mut().poll(&mut cx);
+            if task.should_poll(now) {
+                task.poll();
+            }
         }
+    }
+
+    fn notified(&self) -> bool {
+        self.tasks.iter().any(|t| t.slot.notified.get())
+    }
+
+    fn closest_deadlines(&self, now: [Cycles; 2]) -> Option<(Cycles, Cycles)> {
+        let mut deadlines = (Cycles::MAX, Cycles::MAX);
+        for task in &self.tasks {
+            if task.slot.notified.get() {
+                return None;
+            }
+            deadlines.0 = deadlines
+                .0
+                .min(task.slot.wake_at[Cpu::ID].get() - now[Cpu::ID]);
+            deadlines.1 = deadlines
+                .1
+                .min(task.slot.wake_at[Fixed::ID].get() - now[Fixed::ID]);
+        }
+        Some(deadlines)
+    }
+
+    unsafe fn waker_clone(slot: *const ()) -> RawWaker {
+        let slot: *const Slot = slot.cast();
+        Rc::increment_strong_count(slot);
+        RawWaker::new(slot.cast(), &VTABLE)
+    }
+    unsafe fn wake(slot: *const ()) {
+        Self::wake_by_ref(slot);
+        Self::waker_drop(slot);
+    }
+    unsafe fn wake_by_ref(slot: *const ()) {
+        let slot: *const Slot = slot.cast();
+        (*slot).notified.set(true);
+    }
+    unsafe fn waker_drop(slot: *const ()) {
+        let slot: *const Slot = slot.cast();
+        Rc::decrement_strong_count(slot);
     }
 }
 
@@ -350,46 +586,169 @@ impl Time {
     }
 
     pub fn tick(&mut self) {
-        self.fixed.tick();
-        self.cpu.tick();
-        self.exec.poll();
+        if self.fixed.stopped() && self.cpu.stopped() && !self.exec.notified() {
+            return;
+        }
+        self.fixed.tick(1);
+        self.cpu.tick(1);
+
+        self.exec.poll([self.cpu.counter.now(), self.fixed.0.now()]);
+    }
+
+    pub fn advance(&mut self, max: Cycles) -> Cycles {
+        if self.fixed.stopped() && self.cpu.stopped() && !self.exec.notified() {
+            return 0;
+        }
+        let deadlines = self
+            .exec
+            .closest_deadlines([self.cpu.counter.now(), self.fixed.0.now()]);
+        let ticks = if let Some((d_cpu, d_fixed)) = deadlines {
+            (d_cpu.div_ceil(1 << self.cpu.speed() as u8)).min(d_fixed)
+        } else {
+            1
+        }
+        .min(max);
+        self.fixed.tick(ticks);
+        self.cpu.tick(ticks);
+
+        self.exec.poll([self.cpu.counter.now(), self.fixed.0.now()]);
+
+        ticks
     }
 
     pub fn spawn<F, TD, Fut>(&mut self, get_fut: F)
     where
         F: FnOnce(TD) -> Fut,
-        TD: TimelineType,
+        TD: FromTask,
         Fut: Future<Output = Infallible> + 'static,
     {
-        let task = get_fut(TD::build(&self.cpu, &self.fixed));
-        self.exec.spawn(task);
+        let fut = get_fut(TD::build(&self.cpu, &self.fixed));
+        self.exec.spawn(fut);
     }
 
-    pub fn resume(&self) {
-        self.cpu.resume();
-        self.fixed.resume();
-    }
-
-    pub fn stop(&self) {
-        self.cpu.stop();
-        self.fixed.stop();
+    pub fn stopped(&self) -> bool {
+        self.cpu.stopped() && self.fixed.stopped()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use crate::util::future::Race;
+    use std::{cell::RefCell, future::pending, pin::pin};
 
-    async fn ticker<D: TimeDomain>(
-        t: Timeline<D>,
-        period: Cycles,
-        log: Rc<RefCell<Vec<Cycles>>>,
-    ) -> Infallible {
+    type Log = Rc<RefCell<Vec<Cycles>>>;
+
+    fn log() -> Log {
+        Rc::new(RefCell::new(Vec::new()))
+    }
+
+    /// Counts every poll the executor makes, including the ones that stop at a
+    /// pending leaf without running any of the task's own code.
+    struct PollCounter<T> {
+        inner: BoxFuture<T>,
+        count: Rc<Cell<u32>>,
+    }
+
+    impl<T> PollCounter<T> {
+        fn new(inner: impl Future<Output = T> + 'static, count: Rc<Cell<u32>>) -> Self {
+            Self {
+                inner: Box::pin(inner),
+                count,
+            }
+        }
+    }
+
+    impl<T> Future for PollCounter<T> {
+        type Output = T;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.count.set(self.count.get() + 1);
+            self.inner.as_mut().poll(cx)
+        }
+    }
+
+    /// A level the producer sets, and the signal it raises once it has.
+    #[derive(Clone)]
+    struct Flag {
+        level: Rc<Cell<bool>>,
+        raiser: Raiser,
+    }
+
+    /// The consumer side of a [`Flag`].
+    struct FlagWaiter {
+        level: Rc<Cell<bool>>,
+        listener: Listener,
+    }
+
+    impl Flag {
+        fn new() -> (Flag, FlagWaiter) {
+            let level = Rc::new(Cell::new(false));
+            let (raiser, listener) = signal();
+            (
+                Flag {
+                    level: level.clone(),
+                    raiser,
+                },
+                FlagWaiter { level, listener },
+            )
+        }
+
+        fn set(&self) {
+            self.level.set(true);
+            self.raiser.raise();
+        }
+    }
+
+    impl FlagWaiter {
+        fn until(&mut self) -> Untimed<Until<'_, impl Fn() -> bool + use<'_>>> {
+            let level = &self.level;
+            self.listener.until(|| level.get())
+        }
+    }
+
+    async fn ticker<D: TimeDomain>(t: Timeline<D>, period: Cycles, log: Log) -> Infallible {
         loop {
             t.wait(period).await;
             log.borrow_mut().push(t.position());
         }
+    }
+
+    async fn idle<D: TimeDomain>(t: Timeline<D>, period: Cycles) -> Infallible {
+        loop {
+            t.wait(period).await;
+        }
+    }
+
+    /// Sets `flag` once, `at` fixed cycles in.
+    fn spawn_raiser(clock: &mut Time, flag: Flag, at: Cycles) {
+        clock.spawn(move |t: Timeline<Fixed>| async move {
+            t.wait(at).await;
+            flag.set();
+            pending::<Infallible>().await
+        });
+    }
+
+    /// Parks on `flag`, then logs the fixed cycle it resumed on.
+    fn spawn_waiter(clock: &mut Time, mut flag: FlagWaiter, woke: Log) {
+        let fixed = clock.fixed.clone();
+        clock.spawn(move |_: Timeline<Fixed>| async move {
+            flag.until().raw_fut().await;
+            woke.borrow_mut().push(fixed.0.now());
+            pending::<Infallible>().await
+        });
+    }
+
+    /// Parks on `flag` through `after`, logs its position, then logs it again
+    /// one M-cycle later.
+    fn spawn_realigner(clock: &mut Time, mut flag: FlagWaiter, log: Log) {
+        clock.spawn(move |t: Timeline<Cpu>| async move {
+            t.after(flag.until()).await;
+            log.borrow_mut().push(t.position());
+            t.wait(M_CYCLE).await;
+            log.borrow_mut().push(t.position());
+            pending::<Infallible>().await
+        });
     }
 
     fn clock_tick(clock: &mut Time, ticks: u32) {
@@ -398,12 +757,12 @@ mod tests {
         }
     }
 
-    fn spawn_ticker<D>(clock: &mut Time, period: Cycles) -> Rc<RefCell<Vec<Cycles>>>
+    fn spawn_ticker<D>(clock: &mut Time, period: Cycles) -> Log
     where
-        Timeline<D>: TimelineType,
+        Timeline<D>: FromTask,
         D: TimeDomain + 'static,
     {
-        let log: Rc<RefCell<Vec<Cycles>>> = Rc::new(RefCell::new(Vec::new()));
+        let log = log();
         let handle = log.clone();
         clock.spawn(|timeline: Timeline<D>| ticker(timeline, period, handle));
         log
@@ -468,20 +827,6 @@ mod tests {
     }
 
     #[test]
-    fn div_is_derived_and_resettable() {
-        let mut clock = Time::new();
-
-        clock_tick(&mut clock, 0x120);
-        assert_eq!(clock.cpu.div(), 0x120);
-
-        clock.cpu.reset_div();
-        assert_eq!(clock.cpu.div(), 0);
-
-        clock_tick(&mut clock, 8);
-        assert_eq!(clock.cpu.div(), 8);
-    }
-
-    #[test]
     fn stopped_clock_advances_nothing() {
         let mut clock = Time::new();
         let log = spawn_ticker::<Cpu>(&mut clock, 4);
@@ -493,5 +838,353 @@ mod tests {
         clock.cpu.resume();
         clock_tick(&mut clock, 4);
         assert_eq!(*log.borrow(), vec![4]);
+    }
+
+    #[test]
+    fn parked_task_is_not_polled() {
+        let mut clock = Time::new();
+        let (_flag, mut waiter) = Flag::new();
+        let polls = Rc::new(Cell::new(0));
+
+        let p = polls.clone();
+        clock.spawn(move |_: Timeline<Fixed>| {
+            PollCounter::new(
+                async move {
+                    waiter.until().raw_fut().await;
+                    pending::<Infallible>().await
+                },
+                p,
+            )
+        });
+        assert_eq!(polls.get(), 1, "spawn polls exactly once");
+
+        clock_tick(&mut clock, 100);
+        assert_eq!(polls.get(), 1, "parked task was polled");
+    }
+
+    #[test]
+    fn time_wait_is_polled_only_at_its_deadline() {
+        let mut clock = Time::new();
+        let polls = Rc::new(Cell::new(0));
+
+        let p = polls.clone();
+        clock.spawn(move |t: Timeline<Fixed>| PollCounter::new(idle(t, 8), p));
+
+        clock_tick(&mut clock, 7);
+        assert_eq!(polls.get(), 1, "polled before its deadline");
+
+        clock_tick(&mut clock, 1);
+        assert_eq!(polls.get(), 2);
+
+        clock_tick(&mut clock, 8);
+        assert_eq!(polls.get(), 3);
+    }
+
+    #[test]
+    fn stopped_domain_parks_its_tasks() {
+        let mut clock = Time::new();
+        let polls = Rc::new(Cell::new(0));
+
+        let p = polls.clone();
+        clock.spawn(move |t: Timeline<Cpu>| PollCounter::new(idle(t, 4), p));
+
+        clock.cpu.stop();
+        clock_tick(&mut clock, 16);
+        assert_eq!(polls.get(), 1, "task on a stopped clock was polled");
+
+        clock.cpu.resume();
+        clock_tick(&mut clock, 4);
+        assert_eq!(polls.get(), 2);
+    }
+
+    #[test]
+    fn edge_steps_once_per_raise_then_parks() {
+        let mut clock = Time::new();
+        let (raiser, mut listener) = edge();
+        let steps = Rc::new(Cell::new(0u32));
+        let polls = Rc::new(Cell::new(0));
+
+        let (s, p) = (steps.clone(), polls.clone());
+        clock.spawn(move |_: Timeline<Fixed>| {
+            PollCounter::new(
+                async move {
+                    loop {
+                        listener.next().raw_fut().await;
+                        s.set(s.get() + 1);
+                    }
+                },
+                p,
+            )
+        });
+
+        clock_tick(&mut clock, 10);
+        assert_eq!(steps.get(), 0, "stepped without an edge");
+
+        raiser.raise();
+        clock_tick(&mut clock, 1);
+        assert_eq!(steps.get(), 1);
+
+        let polls_after = polls.get();
+        clock_tick(&mut clock, 10);
+        assert_eq!(steps.get(), 1, "one edge stepped twice");
+        assert_eq!(polls.get(), polls_after, "consumer did not park again");
+    }
+
+    #[test]
+    fn raise_from_earlier_task_lands_in_the_same_pass() {
+        let mut clock = Time::new();
+        let (flag, waiter) = Flag::new();
+        let woke = log();
+
+        spawn_raiser(&mut clock, flag, 8);
+        spawn_waiter(&mut clock, waiter, woke.clone());
+
+        clock_tick(&mut clock, 8);
+        assert_eq!(*woke.borrow(), vec![8]);
+    }
+
+    #[test]
+    fn raise_from_later_task_lands_on_the_next_tick() {
+        let mut clock = Time::new();
+        let (flag, waiter) = Flag::new();
+        let woke = log();
+
+        spawn_waiter(&mut clock, waiter, woke.clone());
+        spawn_raiser(&mut clock, flag, 8);
+
+        clock_tick(&mut clock, 8);
+        assert!(woke.borrow().is_empty());
+
+        clock_tick(&mut clock, 1);
+        assert_eq!(*woke.borrow(), vec![9]);
+    }
+
+    #[test]
+    fn raise_before_parking_is_not_lost() {
+        let mut clock = Time::new();
+        let (flag, mut waiter) = Flag::new();
+        let woke = log();
+        let fixed = clock.fixed.clone();
+
+        let w = woke.clone();
+        clock.spawn(move |t: Timeline<Fixed>| async move {
+            t.wait(8).await;
+            waiter.until().raw_fut().await;
+            w.borrow_mut().push(fixed.0.now());
+            pending::<Infallible>().await
+        });
+
+        // The signal has no waiter yet: only the level carries the event.
+        clock_tick(&mut clock, 4);
+        flag.set();
+
+        clock_tick(&mut clock, 4);
+        assert_eq!(*woke.borrow(), vec![8]);
+    }
+
+    #[test]
+    fn spurious_raise_costs_one_poll() {
+        let mut clock = Time::new();
+        let (flag, mut waiter) = Flag::new();
+        let woke = log();
+        let polls = Rc::new(Cell::new(0));
+        let fixed = clock.fixed.clone();
+
+        let (w, p) = (woke.clone(), polls.clone());
+        clock.spawn(move |_: Timeline<Fixed>| {
+            PollCounter::new(
+                async move {
+                    waiter.until().raw_fut().await;
+                    w.borrow_mut().push(fixed.0.now());
+                    pending::<Infallible>().await
+                },
+                p,
+            )
+        });
+
+        // Raised with the level still low.
+        flag.raiser.raise();
+        clock_tick(&mut clock, 1);
+        assert_eq!(polls.get(), 2);
+        assert!(woke.borrow().is_empty());
+
+        clock_tick(&mut clock, 10);
+        assert_eq!(polls.get(), 2, "did not park again after a spurious wake");
+
+        flag.set();
+        clock_tick(&mut clock, 1);
+        assert_eq!(*woke.borrow(), vec![12]);
+    }
+
+    #[test]
+    fn race_keeps_the_time_branch_running_while_the_event_branch_is_parked() {
+        let mut clock = Time::new();
+        let (flag, mut waiter) = Flag::new();
+        let ticks = log();
+        let woke = log();
+        let fixed = clock.fixed.clone();
+
+        let (tl, w) = (ticks.clone(), woke.clone());
+        clock.spawn(move |t: Timeline<Fixed>| async move {
+            let background = pin!(ticker(t, 4, tl));
+            let main = pin!(waiter.until().raw_fut());
+            Race::new(background, main).await;
+            w.borrow_mut().push(fixed.0.now());
+            pending::<Infallible>().await
+        });
+
+        clock_tick(&mut clock, 12);
+        assert_eq!(*ticks.borrow(), vec![4, 8, 12]);
+        assert!(woke.borrow().is_empty());
+
+        flag.set();
+        clock_tick(&mut clock, 1);
+        assert_eq!(*woke.borrow(), vec![13]);
+
+        clock_tick(&mut clock, 8);
+        assert_eq!(
+            *ticks.borrow(),
+            vec![4, 8, 12],
+            "background outlived the race"
+        );
+    }
+
+    #[test]
+    fn after_rounds_up_to_the_next_grid_point() {
+        let mut clock = Time::new();
+        let (flag, waiter) = Flag::new();
+        let log = log();
+        spawn_realigner(&mut clock, waiter, log.clone());
+
+        clock_tick(&mut clock, 5);
+        flag.set();
+        // Woken at 6, between grid points 4 and 8.
+        clock_tick(&mut clock, 1);
+        assert_eq!(*log.borrow(), vec![]);
+
+        clock_tick(&mut clock, 5);
+        assert_eq!(*log.borrow(), vec![8]);
+        clock_tick(&mut clock, 1);
+        assert_eq!(*log.borrow(), vec![8, 12]);
+    }
+
+    #[test]
+    fn after_on_a_grid_point_keeps_the_position() {
+        let mut clock = Time::new();
+        let (flag, waiter) = Flag::new();
+        let log = log();
+        // Spawned first, so its raise at 8 reaches the waiter in the same pass.
+        spawn_raiser(&mut clock, flag, 8);
+        spawn_realigner(&mut clock, waiter, log.clone());
+
+        clock_tick(&mut clock, 8);
+        assert_eq!(*log.borrow(), vec![8]);
+
+        clock_tick(&mut clock, 4);
+        assert_eq!(*log.borrow(), vec![8, 12]);
+    }
+
+    #[test]
+    fn after_rounds_up_in_double_speed() {
+        let mut clock = Time::new();
+        clock.cpu.switch_speed();
+        let (flag, waiter) = Flag::new();
+        let log = log();
+        spawn_realigner(&mut clock, waiter, log.clone());
+
+        clock_tick(&mut clock, 2);
+        flag.set();
+        // Woken at 6: half an M-cycle past the grid point at 4.
+        clock_tick(&mut clock, 1);
+        assert_eq!(*log.borrow(), vec![]);
+
+        clock_tick(&mut clock, 2);
+        assert_eq!(*log.borrow(), vec![8]);
+        clock_tick(&mut clock, 1);
+        assert_eq!(*log.borrow(), vec![8, 12]);
+    }
+
+    #[test]
+    fn after_keeps_the_task_phase() {
+        let mut clock = Time::new();
+        clock_tick(&mut clock, 1);
+        let (flag, waiter) = Flag::new();
+        let log = log();
+        // Spawned at 1: this task's grid is 1, 5, 9, 13...
+        spawn_realigner(&mut clock, waiter, log.clone());
+
+        clock_tick(&mut clock, 5);
+        flag.set();
+        clock_tick(&mut clock, 1);
+        assert_eq!(*log.borrow(), vec![]);
+
+        clock_tick(&mut clock, 5);
+        assert_eq!(*log.borrow(), vec![9]);
+        clock_tick(&mut clock, 1);
+        assert_eq!(*log.borrow(), vec![9, 13]);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "stale timeline")]
+    fn untimed_wait_without_after_trips_the_stale_check() {
+        let mut clock = Time::new();
+        let (flag, mut waiter) = Flag::new();
+
+        clock.spawn(move |t: Timeline<Cpu>| async move {
+            waiter.until().raw_fut().await;
+            t.wait(M_CYCLE).await;
+            pending::<Infallible>().await
+        });
+
+        clock_tick(&mut clock, 10);
+        flag.set();
+        clock_tick(&mut clock, 1);
+    }
+
+    #[test]
+    fn waker_refcount_stays_balanced() {
+        let mut clock = Time::new();
+        let (flag, mut waiter) = Flag::new();
+
+        clock.spawn(move |_: Timeline<Fixed>| async move {
+            waiter.until().raw_fut().await;
+            pending::<Infallible>().await
+        });
+
+        let slot = clock.exec.tasks[0].slot.clone();
+        // The task's handle, its waker, the clone parked in the listener, and ours.
+        assert_eq!(Rc::strong_count(&slot), 4);
+
+        // Repolling the same task keeps the stored waker rather than cloning.
+        for _ in 0..5 {
+            slot.notified.set(true);
+            clock_tick(&mut clock, 1);
+        }
+        assert_eq!(Rc::strong_count(&slot), 4);
+
+        // Raising consumes the stored waker; once ready, nothing re-registers.
+        flag.set();
+        assert_eq!(Rc::strong_count(&slot), 3);
+        clock_tick(&mut clock, 1);
+        assert_eq!(Rc::strong_count(&slot), 3);
+    }
+
+    #[test]
+    fn slot_of_recognises_only_its_own_waker() {
+        let mut clock = Time::new();
+        clock.spawn(|t: Timeline<Fixed>| idle(t, 4));
+
+        let task = &clock.exec.tasks[0];
+        let own = Context::from_waker(&task.waker);
+        assert!(slot_of(&own).is_some_and(|slot| ptr::eq(slot, &*task.slot)));
+
+        let mut foreign = Context::from_waker(Waker::noop());
+        assert!(slot_of(&foreign).is_none());
+
+        // A wait polled from elsewhere stays pending and registers nothing.
+        let timeline = clock.fixed.timeline();
+        let mut wait = pin!(timeline.wait(4));
+        assert_eq!(wait.as_mut().poll(&mut foreign), Poll::Pending);
     }
 }

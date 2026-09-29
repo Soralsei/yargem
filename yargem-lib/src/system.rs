@@ -2,7 +2,7 @@ use std::cell::Ref;
 use std::rc::Rc;
 
 use crate::audio::apu::Apu;
-use crate::clock::{self, CpuClock, Time, Timeline};
+use crate::clock::{CpuClock, Cycles, Time};
 use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
@@ -20,7 +20,7 @@ use super::debug::blaarg_spy::BlaargSpy;
 use super::memory::mmu::Mmu;
 use super::memory::serial::{LogSink, Serial};
 
-const CYCLES_PER_FRAME: u32 = 70224; // 154 lines * 456 T-cycles
+const CYCLES_PER_FRAME: Cycles = 70224; // 154 lines * 456 T-cycles
 
 /// KEY1 (0xFF4D). Both meaningful bits — current speed and the armed switch —
 /// are clock state, so the handler is a pure view onto `Clock`.
@@ -50,6 +50,7 @@ impl MemoryHandler for Unmapped {
 
 pub struct System {
     cpu: Rc<Cpu>,
+    irq: Rc<InterruptController>,
     ppu: Rc<Ppu>,
     apu: Rc<Apu>,
     time: Time,
@@ -83,14 +84,14 @@ impl System {
             bus_controller.clone(),
             is_cgb,
         ));
-        let apu = Rc::new(Apu::new(is_cgb));
+        let apu = Rc::new(Apu::new(time.fixed.clone(), is_cgb));
 
         let mut map = AddressMap::new();
 
         #[cfg(feature = "blaarg")]
         {
             println!("Added blaarg debug feature");
-            map.add((0xA000, 0xBFFF), Rc::new(BlaargSpy()));
+            mmu.add_handler((0xA000, 0xBFFF), Rc::new(BlaargSpy));
         }
 
         map.add((0x0000, 0x7FFF), mbc.clone());
@@ -134,18 +135,15 @@ impl System {
         time.spawn(|timeline| DMAController::task(dma.clone(), mmu.clone(), timeline));
         time.spawn(|timeline| Timer::task(timer.clone(), timeline));
 
-        time.spawn(|_: Timeline<clock::Cpu>| {
-            Apu::frame_sequencer_task(apu.clone(), timer.div_apu())
-        });
-        time.spawn(|timeline| Apu::generator_task(apu.clone(), timeline));
+        time.spawn(|()| Apu::frame_sequencer_task(apu.clone(), timer.div_apu()));
+        // time.spawn(|timeline| Apu::generator_task(apu.clone(), timeline));
 
         let cpu_clock = time.cpu.clone();
         let fixed_clock = time.fixed.clone();
-        let cpu_clone = cpu.clone();
 
-        time.spawn(move |(t_cpu, t_fixed)| {
+        time.spawn(|(t_cpu, t_fixed)| {
             Cpu::task(
-                cpu_clone,
+                cpu.clone(),
                 interrupt_controller.clone(),
                 CpuBus::new(mmu.clone(), bus_controller.clone()),
                 t_cpu,
@@ -157,6 +155,7 @@ impl System {
 
         Self {
             cpu,
+            irq: interrupt_controller,
             ppu,
             apu,
             time,
@@ -166,17 +165,23 @@ impl System {
 
     pub fn step(&mut self) {
         let mark = self.cpu.instr_count();
-        while self.cpu.instr_count() == mark {
-            self.time.tick();
+        while self.cpu.instr_count() == mark && !self.cpu_parked() {
+            self.time.advance(CYCLES_PER_FRAME);
         }
     }
 
     pub fn run_frame(&mut self) {
-        for _ in 0..(CYCLES_PER_FRAME * 2) {
-            self.time.tick();
-            if self.ppu.take_frame_ready() {
+        const BUDGET: Cycles = 2 * CYCLES_PER_FRAME;
+        let mut done = 0;
+        while done < BUDGET {
+            let advanced = self.time.advance(CYCLES_PER_FRAME);
+            // Both clocks are stalled, no point in running frames
+            // nothing can happen on the system without outside action
+            // or a frame can be displayed
+            if advanced == 0 || self.ppu.take_frame_ready() {
                 break;
             }
+            done += advanced;
         }
     }
 
@@ -189,8 +194,12 @@ impl System {
     }
 
     pub fn set_button(&mut self, btn: Button, down: bool) {
-        if self.joypad.set(btn, down) {
-            self.time.resume();
-        }
+        self.joypad.set(btn, down);
+    }
+
+    pub fn cpu_parked(&self) -> bool {
+        self.cpu.wedged()
+            || self.time.stopped()
+            || (self.cpu.halted() && self.irq.enabled() & 0x1F == 0)
     }
 }
