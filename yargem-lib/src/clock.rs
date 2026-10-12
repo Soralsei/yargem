@@ -48,11 +48,6 @@ impl<D: TimeDomain> Timeline<D> {
         }
     }
 
-    /// Cycles elapsed on this task's clock since power-on.
-    pub fn now(&self) -> Cycles {
-        self.now.get()
-    }
-
     /// The cycle this task has advanced itself to. Trails `now` while catching up.
     pub fn position(&self) -> Cycles {
         self.cursor.get()
@@ -76,37 +71,48 @@ impl<D: TimeDomain> Timeline<D> {
     }
 }
 
-pub(crate) trait TimelineType {
+pub(crate) trait FromTask {
     fn build(cpu: &CpuClock, fixed: &FixedClock) -> Self;
 }
 
-impl TimelineType for Timeline<Cpu> {
+impl FromTask for Timeline<Cpu> {
     fn build(cpu: &CpuClock, _fixed: &FixedClock) -> Self {
         cpu.timeline()
     }
 }
 
-impl TimelineType for Timeline<Fixed> {
+impl FromTask for Timeline<Fixed> {
     fn build(_cpu: &CpuClock, fixed: &FixedClock) -> Self {
         fixed.timeline()
     }
 }
 
-impl TimelineType for (Timeline<Cpu>, Timeline<Fixed>) {
+impl FromTask for (Timeline<Cpu>, Timeline<Fixed>) {
     fn build(cpu: &CpuClock, fixed: &FixedClock) -> Self {
         (cpu.timeline(), fixed.timeline())
     }
 }
 
-impl TimelineType for (Timeline<Fixed>, Timeline<Cpu>) {
+impl FromTask for (Timeline<Fixed>, Timeline<Cpu>) {
     fn build(cpu: &CpuClock, fixed: &FixedClock) -> Self {
         (fixed.timeline(), cpu.timeline())
     }
 }
 
-/// `wait` advances the task's position as a side effect, so dropping one
-/// un-awaited skews every later deadline. `Future`'s own `must_use` does not
-/// cover a named return type.
+struct Slot {
+    wake_at: [Cell<Cycles>; 2],
+    notified: Cell<bool>,
+}
+
+impl Slot {
+    pub fn new() -> Self {
+        Self {
+            wake_at: [const { Cell::new(Cycles::MAX) }; 2],
+            notified: Cell::new(true),
+        }
+    }
+}
+
 #[must_use = "does nothing unless awaited"]
 pub struct Wait {
     now: Rc<Cell<Cycles>>,
@@ -148,6 +154,7 @@ impl Pulse {
     }
 }
 
+#[derive(Clone, Default)]
 pub struct NotifyHandle(Rc<Cell<bool>>);
 
 impl NotifyHandle {
@@ -157,7 +164,40 @@ impl NotifyHandle {
 }
 
 /// Tasks never complete: `Infallible` makes that checked rather than conventional.
-struct Task(BoxFuture<Infallible>);
+struct Task {
+    fut: BoxFuture<Infallible>,
+    slot: Rc<Slot>,
+}
+
+impl Task {
+    pub fn new(fut: BoxFuture<Infallible>) -> Self {
+        Self {
+            fut,
+            slot: Rc::new(Slot::new()),
+        }
+    }
+
+    //
+    pub fn should_poll(&self, now: [Cycles; 2]) -> bool {
+        self.slot.notified.get()
+            || self
+                .slot
+                .wake_at
+                .iter()
+                .zip(now)
+                .any(|(wake, now)| wake.get() >= now)
+    }
+
+    pub fn poll(&mut self, cx: &mut Context) {
+        self.slot.notified.set(false);
+        self.slot
+            .wake_at
+            .iter()
+            .for_each(|wake| wake.set(Cycles::MAX));
+
+        let _ = self.fut.as_mut().poll(cx);
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 
@@ -322,14 +362,17 @@ impl Executor {
         let _ = future
             .as_mut()
             .poll(&mut Context::from_waker(Waker::noop()));
-        self.tasks.push(Task(future));
+
+        let task = Task::new(future);
+
+        self.tasks.push(task);
     }
 
     /// Every task, in spawn order, unconditionally. Order is savestate contract.
     pub fn poll(&mut self) {
         let mut cx = Context::from_waker(Waker::noop());
         for task in self.tasks.iter_mut() {
-            let _ = task.0.as_mut().poll(&mut cx);
+            let _ = task.poll(&mut cx);
         }
     }
 }
@@ -358,11 +401,11 @@ impl Time {
     pub fn spawn<F, TD, Fut>(&mut self, get_fut: F)
     where
         F: FnOnce(TD) -> Fut,
-        TD: TimelineType,
+        TD: FromTask,
         Fut: Future<Output = Infallible> + 'static,
     {
-        let task = get_fut(TD::build(&self.cpu, &self.fixed));
-        self.exec.spawn(task);
+        let fut = get_fut(TD::build(&self.cpu, &self.fixed));
+        self.exec.spawn(fut);
     }
 
     pub fn resume(&self) {
@@ -400,7 +443,7 @@ mod tests {
 
     fn spawn_ticker<D>(clock: &mut Time, period: Cycles) -> Rc<RefCell<Vec<Cycles>>>
     where
-        Timeline<D>: TimelineType,
+        Timeline<D>: FromTask,
         D: TimeDomain + 'static,
     {
         let log: Rc<RefCell<Vec<Cycles>>> = Rc::new(RefCell::new(Vec::new()));

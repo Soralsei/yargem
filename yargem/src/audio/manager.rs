@@ -56,7 +56,7 @@ impl AudioManager {
                 device
                     .build_output_stream(
                         config,
-                        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {},
+                        move |_data: &mut [f32], _: &cpal::OutputCallbackInfo| {},
                         error_cb,
                         None,
                     )
