@@ -95,9 +95,9 @@ impl CpuTask {
                 // halt bug: PC fails to increment, next byte executes twice
                 self.cpu.halt_bug.set(true);
             } else {
-                while self.irq.peek().is_none() {
-                    self.idle().await
-                }
+                self.t
+                    .after(self.irq.signal().until(|| self.irq.peek().is_some()))
+                    .await;
             }
             self.cpu.halted.set(false);
         }

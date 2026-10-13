@@ -118,7 +118,7 @@ impl Apu {
 
     pub async fn frame_sequencer_task(this: Rc<Self>, div_apu: Pulse) -> Infallible {
         loop {
-            div_apu.next().await;
+            div_apu.next().raw_fut().await;
             this.state.borrow_mut().frame_step();
         }
     }

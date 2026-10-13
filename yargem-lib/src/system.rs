@@ -2,7 +2,7 @@ use std::cell::Ref;
 use std::rc::Rc;
 
 use crate::audio::apu::Apu;
-use crate::clock::{self, CpuClock, Time, Timeline};
+use crate::clock::{CpuClock, Time};
 use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
@@ -134,9 +134,7 @@ impl System {
         time.spawn(|timeline| DMAController::task(dma.clone(), mmu.clone(), timeline));
         time.spawn(|timeline| Timer::task(timer.clone(), timeline));
 
-        time.spawn(|_: Timeline<clock::Cpu>| {
-            Apu::frame_sequencer_task(apu.clone(), timer.div_apu())
-        });
+        time.spawn(|()| Apu::frame_sequencer_task(apu.clone(), timer.div_apu()));
         time.spawn(|timeline| Apu::generator_task(apu.clone(), timeline));
 
         let cpu_clock = time.cpu.clone();

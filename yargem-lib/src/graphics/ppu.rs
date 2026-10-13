@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use std::pin::pin;
 use std::rc::Rc;
 
-use crate::clock::{Fixed, Timeline};
+use crate::clock::{Fixed, Signal, Timeline};
 use crate::cpu::interrupt::InterruptRequest;
 use crate::graphics::attributes::{BgAttributes, CGBBank, ObjectAttribute, TilePriority};
 use crate::graphics::fifo::{BgFIFO, ObjFIFO, Pixel};
@@ -114,6 +114,8 @@ pub struct Ppu {
     bus_controller: Rc<BusController>,
 
     is_cgb: bool,
+
+    signal: Signal,
 }
 
 impl Ppu {
@@ -134,6 +136,7 @@ impl Ppu {
             window_ly: Cell::new(0),
             bus_controller,
             is_cgb,
+            signal: Signal::new(),
         }
     }
 
@@ -141,10 +144,13 @@ impl Ppu {
         loop {
             if !this.registers.borrow().lcdc().lcd_ppu_enable {
                 this.registers.borrow_mut().set_ly(0);
-                // Releases both buses: with the LCD off the CPU owns VRAM and OAM.
                 this.set_mode(PpuMode::HBlank);
-                timeline.wait(1).await;
-                continue;
+                timeline
+                    .after(
+                        this.signal
+                            .until(|| this.registers.borrow().lcdc().lcd_ppu_enable),
+                    )
+                    .await;
             }
 
             this.window_y_reached.set(false);
@@ -520,7 +526,7 @@ impl Ppu {
             if window {
                 let wx = self.registers.borrow().wx();
                 if wx != window_wx && lx + 7 == wx as usize {
-                    state.bg_fifo.borrow_mut().push(Pixel::default());
+                    let _ = state.bg_fifo.borrow_mut().push(Pixel::default());
                     window_wx = wx;
                 }
             }
@@ -627,6 +633,7 @@ impl MemoryHandler for Ppu {
                 self.registers.borrow_mut().write(address, value);
                 // LCDC bit 7 gates every lock; a write can free both buses.
                 if address == 0xFF40 {
+                    self.signal.raise();
                     self.apply_bus_locks();
                 }
             }
@@ -641,12 +648,15 @@ mod tests {
     use crate::clock::Time;
     use crate::cpu::interrupt::InterruptController;
     use crate::memory::bus::BusController;
+    use crate::memory::mmu::AddressMap;
 
-    /// Drives the PPU alone, with no CPU: registers and VRAM are poked
-    /// directly, so a failure is in the pixel pipeline and nowhere else.
+    /// Drives the PPU alone, with no CPU: VRAM is poked directly, and registers
+    /// go through the PPU's own write handler, since an LCDC write is what
+    /// wakes a PPU parked with the LCD off.
     struct Harness {
         time: Time,
         ppu: Rc<Ppu>,
+        mmu: Mmu,
         _interrupts: Rc<InterruptController>,
     }
 
@@ -663,12 +673,14 @@ mod tests {
             Self {
                 time,
                 ppu,
+                // The handler never reads through the MMU; it only needs one to call.
+                mmu: Mmu::new(AddressMap::new()),
                 _interrupts: interrupts,
             }
         }
 
         fn reg(&self, address: u16, value: u8) {
-            self.ppu.registers.borrow_mut().write(address, value);
+            let _ = self.ppu.write(&self.mmu, address, value);
         }
 
         fn vram(&self, address: u16, value: u8) {

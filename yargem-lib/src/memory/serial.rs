@@ -2,9 +2,9 @@ use std::io::Write;
 use std::{cell::RefCell, convert::Infallible, rc::Rc};
 
 use super::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu};
-use crate::clock::Cpu;
+use crate::clock::{Cpu, Signal};
 use crate::{
-    clock::{Cycles, Timeline, M_CYCLE},
+    clock::{Cycles, Timeline},
     cpu::interrupt::InterruptRequest,
     is_bit_set,
 };
@@ -56,6 +56,7 @@ impl ByteSink for LogSink {
 pub struct Serial<S: ByteSink> {
     sink: S,
     state: RefCell<SerialState>,
+    signal: Signal,
 }
 
 impl<S: ByteSink> Serial<S> {
@@ -63,6 +64,7 @@ impl<S: ByteSink> Serial<S> {
         Self {
             sink,
             state: RefCell::new(SerialState::new(interrupt_request)),
+            signal: Signal::new(),
         }
     }
 
@@ -70,23 +72,12 @@ impl<S: ByteSink> Serial<S> {
         loop {
             // Idle until software arms a transfer. No borrow may straddle an
             // await: the SC write handler takes the same cell.
-            let driving = loop {
-                let armed = {
+            timeline
+                .after(this.signal.until(|| {
                     let state = this.state.borrow();
-                    state.transfer_enable.then_some(state.clock_select)
-                };
-                match armed {
-                    Some(driving) => break driving,
-                    None => timeline.wait(M_CYCLE as Cycles).await,
-                }
-            };
-
-            // Only the master supplies the clock. As slave the peer does, and
-            // nothing here can time it, so the transfer just stays pending.
-            if !driving {
-                timeline.wait(M_CYCLE as Cycles).await;
-                continue;
-            }
+                    state.transfer_enable && state.clock_select
+                }))
+                .await;
 
             timeline.wait(CYCLES_TO_SEND).await;
             this.state.borrow_mut().complete_transfer(&this.sink);
@@ -143,6 +134,7 @@ impl<S: ByteSink> MemoryHandler for Serial<S> {
     }
 
     fn write(&self, _: &Mmu, address: u16, value: u8) -> MemoryWrite {
+        self.signal.raise();
         self.state.borrow_mut().write(address, value)
     }
 }

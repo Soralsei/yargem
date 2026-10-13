@@ -1,6 +1,7 @@
 use std::{cell::Cell, rc::Rc};
 
 use crate::{
+    clock::Signal,
     is_bit_set,
     memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu},
 };
@@ -59,15 +60,17 @@ impl std::convert::From<&Interrupts> for u8 {
 
 pub struct InterruptRequest {
     request: Rc<Interrupts>,
+    signal: Rc<Signal>,
 }
 
 impl InterruptRequest {
-    pub fn new(request: Rc<Interrupts>) -> InterruptRequest {
-        Self { request }
+    pub fn new(request: Rc<Interrupts>, signal: Rc<Signal>) -> InterruptRequest {
+        Self { request, signal }
     }
 
     pub fn vblank(&self, value: bool) {
         self.request.vblank.set(value);
+        self.signal.raise();
         #[cfg(feature = "debug")]
         if value {
             println!("VBlank requested");
@@ -76,6 +79,7 @@ impl InterruptRequest {
 
     pub fn lcd(&self, value: bool) {
         self.request.lcd.set(value);
+        self.signal.raise();
         #[cfg(feature = "debug")]
         if value {
             println!("LCD interrupt requested");
@@ -84,6 +88,7 @@ impl InterruptRequest {
 
     pub fn timer(&self, value: bool) {
         self.request.timer.set(value);
+        self.signal.raise();
         #[cfg(feature = "debug")]
         if value {
             println!("Timer interrupt requested");
@@ -92,6 +97,7 @@ impl InterruptRequest {
 
     pub fn serial(&self, value: bool) {
         self.request.serial.set(value);
+        self.signal.raise();
         #[cfg(feature = "debug")]
         if value {
             println!("serial interrupt requested");
@@ -100,6 +106,7 @@ impl InterruptRequest {
 
     pub fn joypad(&self, value: bool) {
         self.request.joypad.set(value);
+        self.signal.raise();
         #[cfg(feature = "debug")]
         if value {
             println!("Joypad interrupt requested");
@@ -110,6 +117,7 @@ impl InterruptRequest {
 pub struct InterruptController {
     enable: Rc<Interrupts>,
     flags: Rc<Interrupts>,
+    signal: Rc<Signal>,
 }
 
 impl InterruptController {
@@ -117,11 +125,16 @@ impl InterruptController {
         Self {
             enable: Rc::new(Interrupts::default()),
             flags: Rc::new(Interrupts::default()),
+            signal: Rc::new(Signal::new()),
         }
     }
 
+    pub fn signal(&self) -> &Signal {
+        &self.signal
+    }
+
     pub fn request(&self) -> InterruptRequest {
-        InterruptRequest::new(self.flags.clone())
+        InterruptRequest::new(self.flags.clone(), self.signal.clone())
     }
 
     pub fn peek(&self) -> Option<u8> {
@@ -167,10 +180,12 @@ impl MemoryHandler for InterruptController {
         match address {
             0xffff => {
                 self.enable.set(value);
+                self.signal.raise();
                 MemoryWrite::Block
             }
             0xff0f => {
                 self.flags.set(value);
+                self.signal.raise();
                 MemoryWrite::Block
             }
             _ => {
