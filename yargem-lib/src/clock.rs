@@ -223,12 +223,17 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if (self.predicate)() {
-            self.signal.0.take();
             Poll::Ready(())
         } else {
             self.register(cx.waker());
             Poll::Pending
         }
+    }
+}
+
+impl<F: Fn() -> bool> Drop for Until<'_, F> {
+    fn drop(&mut self) {
+        self.signal.0.take();
     }
 }
 
@@ -571,11 +576,6 @@ impl Time {
     pub fn resume(&self) {
         self.cpu.resume();
         self.fixed.resume();
-    }
-
-    pub fn stop(&self) {
-        self.cpu.stop();
-        self.fixed.stop();
     }
 }
 

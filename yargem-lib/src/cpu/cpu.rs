@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::rc::Rc;
 
 use super::registers::Registers;
-use crate::clock::{self, CpuClock, FixedClock, Timeline, M_CYCLE};
+use crate::clock::{self, CpuClock, FixedClock, Signal, Timeline, M_CYCLE};
 use crate::cpu::instructions::{execute_prefixed, execute_unprefixed};
 use crate::cpu::interrupt::InterruptController;
 use crate::cpu::registers::{Flags, Reg16, Reg8};
@@ -186,10 +186,6 @@ impl CpuTask {
 
         self.t.wait(M_CYCLE).await;
         self.bus.write(addr.wrapping_add(1), msb);
-    }
-
-    pub async fn idle(&self) {
-        self.t.wait(M_CYCLE).await;
     }
 
     pub fn cond(&self, cond: Condition) -> bool {
@@ -376,7 +372,6 @@ impl CpuTask {
             //         // Maybe
             //         return Err(StopGlitchError);
             //     }
-            self.clock.reset_div();
             self.clock.switch_speed();
             self.clock.stop();
 
@@ -394,15 +389,20 @@ impl CpuTask {
             let _ = self.fetch(Reg8::Z).await;
         }
         // For both, enter STOP mode and reset DIV
-        self.clock.reset_div();
         self.clock.stop();
         self.fixed_clock.stop();
     }
 
+    pub async fn idle(&self) {
+        self.t.wait(M_CYCLE).await;
+    }
+
     pub async fn illegal(&self) -> Infallible {
         self.cpu.wedged.set(true);
-        loop {
-            self.idle().await;
-        }
+        let signal = Signal::new();
+        // park cpu task forever
+        signal.until(|| false).raw_fut().await;
+
+        unreachable!();
     }
 }
