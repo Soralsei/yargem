@@ -1,8 +1,12 @@
 use std::io::Write;
-use std::{cell::RefCell, convert::Infallible, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    convert::Infallible,
+    rc::Rc,
+};
 
 use super::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu};
-use crate::clock::{Cpu, Signal};
+use crate::clock::{signal, Cpu, Listener, Raiser};
 use crate::{
     clock::{Cycles, Timeline},
     cpu::interrupt::InterruptRequest,
@@ -56,24 +60,29 @@ impl ByteSink for LogSink {
 pub struct Serial<S: ByteSink> {
     sink: S,
     state: RefCell<SerialState>,
-    signal: Signal,
+    raiser: Raiser,
+    /// Taken by the task when it starts: it is the only consumer.
+    listener: Cell<Option<Listener>>,
 }
 
 impl<S: ByteSink> Serial<S> {
     pub fn new(interrupt_request: InterruptRequest, sink: S) -> Self {
+        let (raiser, listener) = signal();
         Self {
             sink,
             state: RefCell::new(SerialState::new(interrupt_request)),
-            signal: Signal::new(),
+            raiser,
+            listener: Cell::new(Some(listener)),
         }
     }
 
     pub async fn task(this: Rc<Serial<S>>, timeline: Timeline<Cpu>) -> Infallible {
+        let mut writes = this.listener.take().expect("serial task spawned twice");
         loop {
             // Idle until software arms a transfer. No borrow may straddle an
             // await: the SC write handler takes the same cell.
             timeline
-                .after(this.signal.until(|| {
+                .after(writes.until(|| {
                     let state = this.state.borrow();
                     state.transfer_enable && state.clock_select
                 }))
@@ -134,8 +143,9 @@ impl<S: ByteSink> MemoryHandler for Serial<S> {
     }
 
     fn write(&self, _: &Mmu, address: u16, value: u8) -> MemoryWrite {
-        self.signal.raise();
-        self.state.borrow_mut().write(address, value)
+        let write = self.state.borrow_mut().write(address, value);
+        self.raiser.raise();
+        write
     }
 }
 

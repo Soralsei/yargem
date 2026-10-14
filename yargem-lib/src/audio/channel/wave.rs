@@ -30,7 +30,7 @@ impl Default for Wave {
 impl Wave {
     pub fn read_wave(&self, address: u16) -> u8 {
         debug_assert!(
-            address >= 0xFF30 && address <= 0xFF3F,
+            (0xFF30..=0xFF3F).contains(&address),
             "wave ram write out of bounds at 0x{:04X}",
             address
         );
@@ -39,7 +39,7 @@ impl Wave {
     }
     pub fn write_wave(&mut self, address: u16, value: u8) {
         debug_assert!(
-            address >= 0xFF30 && address <= 0xFF3F,
+            (0xFF30..=0xFF3F).contains(&address),
             "wave ram write out of bounds at 0x{:04X}",
             address
         );

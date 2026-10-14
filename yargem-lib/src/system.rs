@@ -50,6 +50,7 @@ impl MemoryHandler for Unmapped {
 
 pub struct System {
     cpu: Rc<Cpu>,
+    irq: Rc<InterruptController>,
     ppu: Rc<Ppu>,
     apu: Rc<Apu>,
     time: Time,
@@ -139,11 +140,10 @@ impl System {
 
         let cpu_clock = time.cpu.clone();
         let fixed_clock = time.fixed.clone();
-        let cpu_clone = cpu.clone();
 
-        time.spawn(move |(t_cpu, t_fixed)| {
+        time.spawn(|(t_cpu, t_fixed)| {
             Cpu::task(
-                cpu_clone,
+                cpu.clone(),
                 interrupt_controller.clone(),
                 CpuBus::new(mmu.clone(), bus_controller.clone()),
                 t_cpu,
@@ -155,6 +155,7 @@ impl System {
 
         Self {
             cpu,
+            irq: interrupt_controller,
             ppu,
             apu,
             time,
@@ -164,7 +165,7 @@ impl System {
 
     pub fn step(&mut self) {
         let mark = self.cpu.instr_count();
-        while self.cpu.instr_count() == mark {
+        while self.cpu.instr_count() == mark && !self.cpu_parked() {
             self.time.tick();
         }
     }
@@ -187,8 +188,12 @@ impl System {
     }
 
     pub fn set_button(&mut self, btn: Button, down: bool) {
-        if self.joypad.set(btn, down) {
-            self.time.resume();
-        }
+        self.joypad.set(btn, down);
+    }
+
+    pub fn cpu_parked(&self) -> bool {
+        self.cpu.wedged()
+            || self.time.stopped()
+            || (self.cpu.halted() && self.irq.enabled() & 0x1F == 0)
     }
 }

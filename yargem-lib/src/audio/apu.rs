@@ -5,7 +5,7 @@ use crate::{
         channel::{Channel, Noise, Square, Wave},
         registers::AudioRegisters,
     },
-    clock::{Fixed, Pulse, Timeline},
+    clock::{EdgeListener, Fixed, Timeline},
     is_bit_set,
     memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu},
     util::containers::CircularBuffer,
@@ -116,7 +116,7 @@ impl Apu {
         out
     }
 
-    pub async fn frame_sequencer_task(this: Rc<Self>, div_apu: Pulse) -> Infallible {
+    pub async fn frame_sequencer_task(this: Rc<Self>, mut div_apu: EdgeListener) -> Infallible {
         loop {
             div_apu.next().raw_fut().await;
             this.state.borrow_mut().frame_step();
@@ -231,7 +231,7 @@ impl ApuState {
 
     fn will_clock_length_next(&self) -> bool {
         // next step will clock if it is even
-        self.sequencer_step % 2 == 0
+        self.sequencer_step.is_multiple_of(2)
     }
 
     pub fn frame_step(&mut self) {
@@ -240,7 +240,7 @@ impl ApuState {
         }
         let step = self.sequencer_step;
         // even steps
-        if step % 2 == 0 {
+        if step.is_multiple_of(2) {
             each_channel!(self, ch => ch.clock_length());
         }
 

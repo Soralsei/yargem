@@ -4,14 +4,14 @@ use std::convert::Infallible;
 use std::pin::pin;
 use std::rc::Rc;
 
-use crate::clock::{Fixed, Signal, Timeline};
+use crate::clock::{signal, Fixed, Listener, Raiser, Timeline};
 use crate::cpu::interrupt::InterruptRequest;
 use crate::graphics::attributes::{BgAttributes, CGBBank, ObjectAttribute, TilePriority};
 use crate::graphics::fifo::{BgFIFO, ObjFIFO, Pixel};
 use crate::graphics::registers::{ObjSize, PpuMode, PpuRegisters, TileAddressing, TileArea};
 use crate::memory::bus::{Bus, BusController, BusOwner};
 use crate::memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu};
-use crate::util::future::Race;
+use crate::util::future::{Either, Race};
 use crate::{is_bit_set, SCREEN_H, SCREEN_W};
 
 const OAM_SCAN_DOTS: u16 = 2;
@@ -115,7 +115,10 @@ pub struct Ppu {
 
     is_cgb: bool,
 
-    signal: Signal,
+    /// Raised on every LCDC write, so the task sees the LCD switch on or off.
+    raiser: Raiser,
+    /// Taken by the task when it starts: it is the only consumer.
+    listener: Cell<Option<Listener>>,
 }
 
 impl Ppu {
@@ -124,6 +127,7 @@ impl Ppu {
         bus_controller: Rc<BusController>,
         is_cgb: bool,
     ) -> Self {
+        let (raiser, listener) = signal();
         Self {
             registers: RefCell::default(),
             interrupt_request,
@@ -136,65 +140,81 @@ impl Ppu {
             window_ly: Cell::new(0),
             bus_controller,
             is_cgb,
-            signal: Signal::new(),
+            raiser,
+            listener: Cell::new(Some(listener)),
         }
     }
 
     pub async fn task(this: Rc<Self>, timeline: Timeline<Fixed>) -> Infallible {
+        let mut lcdc = this.listener.take().expect("PPU task spawned twice");
         loop {
             if !this.registers.borrow().lcdc().lcd_ppu_enable {
                 this.registers.borrow_mut().set_ly(0);
                 this.set_mode(PpuMode::HBlank);
                 timeline
-                    .after(
-                        this.signal
-                            .until(|| this.registers.borrow().lcdc().lcd_ppu_enable),
-                    )
+                    .after(lcdc.until(|| this.registers.borrow().lcdc().lcd_ppu_enable))
                     .await;
             }
 
-            this.window_y_reached.set(false);
-            this.window_ly.set(0);
-            for ly in 0..144 {
-                // Mode 2: OAM scan
-                // LYC coincidence is its own STAT source, evaluated as LY moves.
-                let lyc_lcd = {
-                    let mut registers = this.registers.borrow_mut();
-                    registers.set_ly(ly);
-                    registers.stat().lyc_int_select && registers.stat().lyc_ly_eq
-                };
-                if lyc_lcd {
-                    this.interrupt_request.lcd(true);
-                }
-                this.set_mode(PpuMode::OamScan);
-                // async 80 dots
-                let objects = this.oam_scan(ly, &timeline).await;
-
-                // Mode 3: pixel draw
-                this.set_mode(PpuMode::Drawing);
-                // latch wy reached for the rest of the frame
-                let wy = this.registers.borrow().wy();
-                this.window_y_reached
-                    .set(this.window_y_reached.get() | (ly == wy));
-                let dots = this.draw_line(ly, &objects, &timeline).await;
-
-                // Mode 0: HBlank
-                this.set_mode(PpuMode::HBlank);
-                timeline.wait(376u64.saturating_sub(dots)).await;
+            // The frame runs on a fork: its waits move the cursor as they are
+            // created, so a frame cut short leaves its fork on a deadline that
+            // never came. Only a finished frame is joined back; after a
+            // disable, the `after` above realigns `timeline` from the frame's
+            // start. The disable is polled first so a step due on the same dot
+            // does not run with the LCD already off.
+            let frame_timeline = timeline.fork();
+            let lcd_off = pin!(lcdc
+                .until(|| !this.registers.borrow().lcdc().lcd_ppu_enable)
+                .raw_fut());
+            let frame = pin!(this.frame(&frame_timeline));
+            if let Either::Right(()) = Race::new(lcd_off, frame).await {
+                timeline.join(&frame_timeline);
             }
+        }
+    }
 
-            // Mode 1: VBlank
-            this.set_mode(PpuMode::VBlank);
-            this.present_frame();
-            this.interrupt_request.vblank(true);
-            for ly in 144..154 {
-                this.registers.borrow_mut().set_ly(ly);
-                timeline.wait(456).await;
-                let registers = this.registers.borrow();
-                let lyc_lcd = registers.stat().lyc_int_select && registers.stat().lyc_ly_eq;
-                if lyc_lcd {
-                    this.interrupt_request.lcd(true);
-                }
+    async fn frame(&self, timeline: &Timeline<Fixed>) {
+        self.window_y_reached.set(false);
+        self.window_ly.set(0);
+        for ly in 0..144 {
+            // Mode 2: OAM scan
+            // LYC coincidence is its own STAT source, evaluated as LY moves.
+            let lyc_lcd = {
+                let mut registers = self.registers.borrow_mut();
+                registers.set_ly(ly);
+                registers.stat().lyc_int_select && registers.stat().lyc_ly_eq
+            };
+            if lyc_lcd {
+                self.interrupt_request.lcd(true);
+            }
+            self.set_mode(PpuMode::OamScan);
+            // async 80 dots
+            let objects = self.oam_scan(ly, timeline).await;
+
+            // Mode 3: pixel draw
+            self.set_mode(PpuMode::Drawing);
+            // latch wy reached for the rest of the frame
+            let wy = self.registers.borrow().wy();
+            self.window_y_reached
+                .set(self.window_y_reached.get() | (ly == wy));
+            let dots = self.draw_line(ly, &objects, timeline).await;
+
+            // Mode 0: HBlank
+            self.set_mode(PpuMode::HBlank);
+            timeline.wait(376u64.saturating_sub(dots)).await;
+        }
+
+        // Mode 1: VBlank
+        self.set_mode(PpuMode::VBlank);
+        self.present_frame();
+        self.interrupt_request.vblank(true);
+        for ly in 144..154 {
+            self.registers.borrow_mut().set_ly(ly);
+            timeline.wait(456).await;
+            let registers = self.registers.borrow();
+            let lyc_lcd = registers.stat().lyc_int_select && registers.stat().lyc_ly_eq;
+            if lyc_lcd {
+                self.interrupt_request.lcd(true);
             }
         }
     }
@@ -324,7 +344,8 @@ impl Ppu {
         let (ft, st) = (timeline.fork(), timeline.fork());
         let fetcher = pin!(self.fetcher(&state, ft.clone()));
         let shifter = pin!(self.shifter(objects, &state, st.clone()));
-        Race::new(shifter, fetcher).await;
+        // The fetcher never finishes: the line ends with the shifter.
+        Race::new(fetcher, shifter).await;
 
         if state.window.get() {
             self.window_ly.set(self.window_ly.get() + 1);
@@ -633,7 +654,7 @@ impl MemoryHandler for Ppu {
                 self.registers.borrow_mut().write(address, value);
                 // LCDC bit 7 gates every lock; a write can free both buses.
                 if address == 0xFF40 {
-                    self.signal.raise();
+                    self.raiser.raise();
                     self.apply_bus_locks();
                 }
             }

@@ -92,11 +92,11 @@ impl JoypadHandler {
         }
     }
 
-    pub fn set(&self, button: Button, down: bool) -> bool {
+    pub fn set(&self, button: Button, down: bool) {
         self.state_change(|joypad| joypad.set(button, down))
     }
 
-    fn state_change(&self, change: impl FnOnce(&mut Joypad)) -> bool {
+    fn state_change(&self, change: impl FnOnce(&mut Joypad)) {
         let mut joypad = self.joypad.get();
         let before = joypad.get() & 0x0F;
         change(&mut joypad);
@@ -107,7 +107,6 @@ impl JoypadHandler {
         if fell {
             self.interrupt_request.joypad(true);
         }
-        fell
     }
 }
 
@@ -126,7 +125,7 @@ impl MemoryHandler for JoypadHandler {
         value: u8,
     ) -> crate::memory::mmu::MemoryWrite {
         if address == 0xFF00 {
-            let _ = self.state_change(|joypad| joypad.select(value));
+            self.state_change(|joypad| joypad.select(value));
             return MemoryWrite::Block;
         }
         unreachable!(

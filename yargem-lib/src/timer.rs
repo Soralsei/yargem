@@ -1,7 +1,11 @@
-use std::{cell::RefCell, convert::Infallible, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    convert::Infallible,
+    rc::Rc,
+};
 
 use crate::{
-    clock::{Cpu, CpuClock, Cycles, Pulse, Timeline, M_CYCLE},
+    clock::{edge, Cpu, CpuClock, Cycles, EdgeListener, EdgeRaiser, Timeline, M_CYCLE},
     cpu::interrupt::InterruptRequest,
     is_bit_set,
     memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite},
@@ -13,16 +17,20 @@ const TIMA_PERIODS: [u16; 4] = [1024, 16, 64, 256];
 /// handler, which never nest, so one cell at the device boundary is enough and
 /// all of the logic below keeps plain `&mut self`.
 pub struct Timer {
-    div_apu: Pulse,
+    div_apu: EdgeRaiser,
+    /// Handed to the APU frame sequencer, the edge's only consumer.
+    div_apu_listener: Cell<Option<EdgeListener>>,
     clock: Rc<CpuClock>,
     state: RefCell<TimerState>,
 }
 
 impl Timer {
     pub fn new(interrupt_request: InterruptRequest, clock: Rc<CpuClock>, is_cgb: bool) -> Self {
+        let (div_apu, div_apu_listener) = edge();
         Self {
             clock,
-            div_apu: Pulse::new(),
+            div_apu,
+            div_apu_listener: Cell::new(Some(div_apu_listener)),
             state: RefCell::new(TimerState {
                 interrupt_request,
                 tima: 0,
@@ -43,8 +51,10 @@ impl Timer {
         }
     }
 
-    pub fn div_apu(&self) -> Pulse {
-        self.div_apu.clone()
+    pub fn div_apu(&self) -> EdgeListener {
+        self.div_apu_listener
+            .take()
+            .expect("DIV-APU listener already taken")
     }
 
     pub async fn task(this: Rc<Self>, timeline: Timeline<Cpu>) -> Infallible {

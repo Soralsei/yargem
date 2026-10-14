@@ -3,7 +3,7 @@
 use std::{cell::Cell, convert::Infallible, rc::Rc};
 
 use crate::{
-    clock::{Cpu, Cycles, Signal, Timeline, M_CYCLE},
+    clock::{signal, Cpu, Cycles, Listener, Raiser, Timeline, M_CYCLE},
     memory::{
         bus::{Bus, BusController, BusOwner},
         mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu},
@@ -33,15 +33,19 @@ impl DMAState {
 pub struct DMAController {
     bus_controller: Rc<BusController>,
     state: DMAState,
-    signal: Signal,
+    raiser: Raiser,
+    /// Taken by the task when it starts: it is the only consumer.
+    listener: Cell<Option<Listener>>,
 }
 
 impl DMAController {
     pub fn new(bus_controller: Rc<BusController>) -> Self {
+        let (raiser, listener) = signal();
         Self {
             bus_controller,
             state: DMAState::new(),
-            signal: Signal::new(),
+            raiser,
+            listener: Cell::new(Some(listener)),
         }
     }
 
@@ -50,9 +54,10 @@ impl DMAController {
         mmu: Rc<Mmu>,
         timeline: Timeline<Cpu>,
     ) -> Infallible {
+        let mut requests = this.listener.take().expect("DMA task spawned twice");
         'outer: loop {
             timeline
-                .after(this.signal.until(|| this.state.requested.take()))
+                .after(requests.until(|| this.state.requested.take()))
                 .await;
             let src = (this.state.src_addr_reg.get() as u16) << 8;
             for offset in 0..0xA0u16 {
@@ -99,7 +104,7 @@ impl MemoryHandler for DMAController {
 
         self.state.src_addr_reg.set(value);
         self.state.requested.set(true);
-        self.signal.raise();
+        self.raiser.raise();
 
         MemoryWrite::Block
     }

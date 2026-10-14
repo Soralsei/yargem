@@ -114,11 +114,9 @@ fn main() {
 
                 for frame in data.chunks_exact_mut(channels) {
                     let resampled = resampler.resample(|| {
-                        audio_rx.pop().ok().and_then(|s| {
-                            Some(StereoFrame {
-                                left: s[0],
-                                right: s[1],
-                            })
+                        audio_rx.pop().ok().map(|s| StereoFrame {
+                            left: s[0],
+                            right: s[1],
                         })
                     });
 

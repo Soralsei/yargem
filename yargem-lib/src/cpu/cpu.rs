@@ -1,11 +1,12 @@
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::convert::Infallible;
+use std::future;
 use std::rc::Rc;
 
 use super::registers::Registers;
-use crate::clock::{self, CpuClock, FixedClock, Signal, Timeline, M_CYCLE};
+use crate::clock::{self, CpuClock, FixedClock, Listener, Timeline, M_CYCLE};
 use crate::cpu::instructions::{execute_prefixed, execute_unprefixed};
-use crate::cpu::interrupt::InterruptController;
+use crate::cpu::interrupt::{InterruptController, JOYPAD};
 use crate::cpu::registers::{Flags, Reg16, Reg8};
 use crate::memory::bus::CpuBus;
 use crate::util::bit_operations::*;
@@ -51,9 +52,10 @@ impl Cpu {
         clock: Rc<CpuClock>,
         fixed_clock: Rc<FixedClock>,
     ) -> Infallible {
-        let task = CpuTask {
+        let mut task = CpuTask {
             t,
             t_fixed,
+            irq_listener: irq.take_listener(),
             cpu,
             irq,
             bus,
@@ -73,14 +75,23 @@ impl Cpu {
         self.halted.set(true);
     }
 
+    pub fn halted(&self) -> bool {
+        self.halted.get()
+    }
+
     pub fn set_ime(&self, active: Ime) {
         self.ime.set(active);
+    }
+
+    pub fn wedged(&self) -> bool {
+        self.wedged.get()
     }
 }
 
 pub struct CpuTask {
     cpu: Rc<Cpu>,
     irq: Rc<InterruptController>,
+    irq_listener: Listener,
     bus: CpuBus,
     clock: Rc<CpuClock>,
     fixed_clock: Rc<FixedClock>,
@@ -89,14 +100,14 @@ pub struct CpuTask {
 }
 
 impl CpuTask {
-    pub async fn step(&self) {
+    pub async fn step(&mut self) {
         if self.cpu.halted.get() {
             if self.cpu.ime.get() == Ime::Disabled && self.irq.peek().is_some() {
                 // halt bug: PC fails to increment, next byte executes twice
                 self.cpu.halt_bug.set(true);
             } else {
                 self.t
-                    .after(self.irq.signal().until(|| self.irq.peek().is_some()))
+                    .after(self.irq_listener.until(|| self.irq.peek().is_some()))
                     .await;
             }
             self.cpu.halted.set(false);
@@ -115,7 +126,7 @@ impl CpuTask {
         self.execute().await;
     }
 
-    async fn execute(&self) {
+    async fn execute(&mut self) {
         self.fetch(Reg8::Z).await;
         let opcode = self.registers().z;
         match opcode {
@@ -348,8 +359,11 @@ impl CpuTask {
         self.cpu.halt();
     }
 
-    pub async fn stop(&self) {
-        let interrupt_pending = self.bus.peek(0xFFFF) & self.bus.peek(0xFF0F) & 0x1F;
+    pub async fn stop(&mut self) {
+        let int_enabled = self.bus.peek(0xFFFF);
+        let int_req = self.bus.peek(0xFF0F);
+        let interrupt_pending = int_enabled & int_req & 0x1F;
+
         let joyp = self.bus.peek(0xFF00) & 0x0F;
 
         // If a button is being held on a selected line in JOYP
@@ -376,6 +390,7 @@ impl CpuTask {
             self.clock.stop();
 
             // The CPU sits out the next 2050 M-cycles
+            self.t_fixed.realign();
             self.t_fixed.wait(2050 * M_CYCLE).await;
 
             self.clock.resume();
@@ -391,6 +406,12 @@ impl CpuTask {
         // For both, enter STOP mode and reset DIV
         self.clock.stop();
         self.fixed_clock.stop();
+        self.t
+            .after(
+                self.irq_listener
+                    .until(|| int_req & int_enabled & JOYPAD != 0),
+            )
+            .await;
     }
 
     pub async fn idle(&self) {
@@ -399,10 +420,6 @@ impl CpuTask {
 
     pub async fn illegal(&self) -> Infallible {
         self.cpu.wedged.set(true);
-        let signal = Signal::new();
-        // park cpu task forever
-        signal.until(|| false).raw_fut().await;
-
-        unreachable!();
+        future::pending::<Infallible>().await
     }
 }
