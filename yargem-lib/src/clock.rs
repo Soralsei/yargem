@@ -403,8 +403,8 @@ impl FixedClock {
     pub fn new() -> Rc<Self> {
         Rc::new(Self(Counter::new()))
     }
-    fn tick(&self) {
-        self.0.advance(1);
+    fn tick(&self, ticks: Cycles) {
+        self.0.advance(ticks);
     }
     fn timeline(&self) -> Timeline<Fixed> {
         self.0.timeline()
@@ -439,8 +439,8 @@ impl CpuClock {
         })
     }
 
-    fn tick(&self) {
-        self.counter.advance(1 << self.speed.get() as u8);
+    fn tick(&self, ticks: Cycles) {
+        self.counter.advance(ticks << self.speed.get() as u8);
     }
     fn timeline(&self) -> Timeline<Cpu> {
         self.counter.timeline()
@@ -531,6 +531,26 @@ impl Executor {
         }
     }
 
+    fn notified(&self) -> bool {
+        self.tasks.iter().any(|t| t.slot.notified.get())
+    }
+
+    fn closest_deadlines(&self, now: [Cycles; 2]) -> Option<(Cycles, Cycles)> {
+        let mut deadlines = (Cycles::MAX, Cycles::MAX);
+        for task in &self.tasks {
+            if task.slot.notified.get() {
+                return None;
+            }
+            deadlines.0 = deadlines
+                .0
+                .min(task.slot.wake_at[Cpu::ID].get() - now[Cpu::ID]);
+            deadlines.1 = deadlines
+                .1
+                .min(task.slot.wake_at[Fixed::ID].get() - now[Fixed::ID]);
+        }
+        Some(deadlines)
+    }
+
     unsafe fn waker_clone(slot: *const ()) -> RawWaker {
         let slot: *const Slot = slot.cast();
         Rc::increment_strong_count(slot);
@@ -566,9 +586,34 @@ impl Time {
     }
 
     pub fn tick(&mut self) {
-        self.fixed.tick();
-        self.cpu.tick();
+        if self.fixed.stopped() && self.cpu.stopped() && !self.exec.notified() {
+            return;
+        }
+        self.fixed.tick(1);
+        self.cpu.tick(1);
+
         self.exec.poll([self.cpu.counter.now(), self.fixed.0.now()]);
+    }
+
+    pub fn advance(&mut self, max: Cycles) -> Cycles {
+        if self.fixed.stopped() && self.cpu.stopped() && !self.exec.notified() {
+            return 0;
+        }
+        let deadlines = self
+            .exec
+            .closest_deadlines([self.cpu.counter.now(), self.fixed.0.now()]);
+        let ticks = if let Some((d_cpu, d_fixed)) = deadlines {
+            (d_cpu.div_ceil(1 << self.cpu.speed() as u8)).min(d_fixed)
+        } else {
+            1
+        }
+        .min(max);
+        self.fixed.tick(ticks);
+        self.cpu.tick(ticks);
+
+        self.exec.poll([self.cpu.counter.now(), self.fixed.0.now()]);
+
+        ticks
     }
 
     pub fn spawn<F, TD, Fut>(&mut self, get_fut: F)

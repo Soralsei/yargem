@@ -2,7 +2,7 @@ use std::cell::Ref;
 use std::rc::Rc;
 
 use crate::audio::apu::Apu;
-use crate::clock::{CpuClock, Time};
+use crate::clock::{CpuClock, Cycles, Time};
 use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
@@ -20,7 +20,7 @@ use super::debug::blaarg_spy::BlaargSpy;
 use super::memory::mmu::Mmu;
 use super::memory::serial::{LogSink, Serial};
 
-const CYCLES_PER_FRAME: u32 = 70224; // 154 lines * 456 T-cycles
+const CYCLES_PER_FRAME: Cycles = 70224; // 154 lines * 456 T-cycles
 
 /// KEY1 (0xFF4D). Both meaningful bits — current speed and the armed switch —
 /// are clock state, so the handler is a pure view onto `Clock`.
@@ -166,16 +166,22 @@ impl System {
     pub fn step(&mut self) {
         let mark = self.cpu.instr_count();
         while self.cpu.instr_count() == mark && !self.cpu_parked() {
-            self.time.tick();
+            self.time.advance(CYCLES_PER_FRAME);
         }
     }
 
     pub fn run_frame(&mut self) {
-        for _ in 0..(CYCLES_PER_FRAME * 2) {
-            self.time.tick();
-            if self.ppu.take_frame_ready() {
+        const BUDGET: Cycles = 2 * CYCLES_PER_FRAME;
+        let mut done = 0;
+        while done < BUDGET {
+            let advanced = self.time.advance(CYCLES_PER_FRAME);
+            // Both clocks are stalled, no point in running frames
+            // nothing can happen on the system without outside action
+            // or a frame can be displayed
+            if advanced == 0 || self.ppu.take_frame_ready() {
                 break;
             }
+            done += advanced;
         }
     }
 
