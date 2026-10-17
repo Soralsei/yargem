@@ -108,6 +108,12 @@ impl CpuBus {
     pub fn peek(&self, address: u16) -> u8 {
         self.mmu.peek(address)
     }
+
+    /// Write without arbitration, for the places
+    /// the CPU alters state rather than driving the bus (STOP resetting DIV).
+    pub fn poke(&self, address: u16, value: u8) {
+        self.mmu.poke(address, value);
+    }
 }
 
 #[cfg(test)]

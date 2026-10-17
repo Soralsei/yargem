@@ -49,18 +49,16 @@ impl<D: TimeDomain> Timeline<D> {
     /// Suspend until `n` more cycles pass. Cumulative, not `now + n`: a tick can
     /// carry several M-cycles, and a task must catch up rather than drop the
     /// overshoot.
-    pub fn wait(&self, n: Cycles) -> Wait<D> {
+    pub fn wait(&self, n: Cycles) -> Wait<'_, D> {
         debug_assert!(
             self.now.get().saturating_sub(self.cursor.get()) < D::CYCLE_ALIGNMENT,
             "stale timeline: untimed wait without `after`?"
         );
-        let wake_at = self.cursor.get().wrapping_add(n);
-        self.cursor.set(wake_at);
-        Wait {
-            tag: PhantomData,
-            now: self.now.clone(),
-            at: wake_at,
-        }
+        self.wait_until(self.cursor.get() + n)
+    }
+
+    fn wait_until(&self, at: Cycles) -> Wait<'_, D> {
+        Wait { timeline: self, at }
     }
 
     /// The cycle this task has advanced itself to. Trails `now` while catching up.
@@ -79,20 +77,18 @@ impl<D: TimeDomain> Timeline<D> {
         }
     }
 
-    /// Absorb a branch's progress back into this timeline.
-    pub fn join(&self, branch: &Timeline<D>) {
-        let furthest = self.cursor.get().max(branch.cursor.get());
-        self.cursor.set(furthest);
-    }
-
-    pub fn realign(&self) {
+    fn get_align(&self) -> Cycles {
         let cursor = self.cursor.get();
         let dt = self.now.get().saturating_sub(cursor);
 
         let step_size = D::CYCLE_ALIGNMENT;
-
         let steps = dt.div_ceil(step_size);
-        self.cursor.set(cursor + steps * step_size);
+
+        cursor + steps * step_size
+    }
+
+    pub fn realign(&self) {
+        self.cursor.set(self.get_align());
     }
 
     /// Wait for an event that doesn't track time, then resume on this domain's
@@ -104,14 +100,7 @@ impl<D: TimeDomain> Timeline<D> {
     {
         event.raw_fut().await;
 
-        self.realign();
-
-        // Not a no-op: the deadline is the cursor rounded up. However, moving just the
-        // cursor only shifts later deadlines (written by future `Timeline::wait`s), meaning
-        // the code right after this function returns could execute misaligned with the
-        // tasks cycle grid (for example a halted Cpu waiting on an interrupt, woken by the
-        // Ppu running on a different time domain)
-        self.wait(0).await;
+        self.wait_until(self.get_align()).await;
     }
 }
 
@@ -170,19 +159,20 @@ fn slot_of<'a>(ctx: &'a Context<'_>) -> Option<&'a Slot> {
 }
 
 #[must_use = "does nothing unless awaited"]
-pub struct Wait<D: TimeDomain> {
-    tag: PhantomData<D>,
-    now: Rc<Cell<Cycles>>,
+pub struct Wait<'a, D: TimeDomain> {
+    timeline: &'a Timeline<D>,
     at: Cycles,
 }
 
-impl<D> Future for Wait<D>
+impl<D> Future for Wait<'_, D>
 where
     D: TimeDomain,
 {
     type Output = ();
     fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<()> {
-        if self.now.get() >= self.at {
+        if self.timeline.now.get() >= self.at {
+            let cursor = &self.timeline.cursor;
+            cursor.set(cursor.get().max(self.at));
             Poll::Ready(())
         } else {
             if let Some(slot) = slot_of(ctx) {
@@ -430,11 +420,9 @@ impl FixedClock {
     }
 }
 
-/// CPU clock. Doubles in CGB double speed, and carries the state derived from
-/// it: the divider, and the speed switch that changes its own rate.
+/// CPU clock. Doubles in CGB double speed
 pub struct CpuClock {
     counter: Counter,
-    div_epoch: Cell<Cycles>,
     speed: Cell<Speed>,
     switch_armed: Cell<bool>,
 }
@@ -443,9 +431,8 @@ impl CpuClock {
     pub fn new() -> Rc<Self> {
         Rc::new(Self {
             counter: Counter::new(),
-            div_epoch: Cell::new(0),
             speed: Cell::default(),
-            switch_armed: Cell::new(false),
+            switch_armed: false.into(),
         })
     }
 
@@ -459,21 +446,16 @@ impl CpuClock {
         self.counter.resume();
     }
 
-    /// STOP and the speed-switch stall both land here. Freezing the counter
-    /// freezes DIV with it, since DIV is derived from it.
+    pub fn now(&self) -> Cycles {
+        self.counter.now()
+    }
+
+    /// STOP and the speed-switch stall both land here.
     pub fn stop(&self) {
         self.counter.stop();
-        self.reset_div();
     }
     fn stopped(&self) -> bool {
         self.counter.stopped()
-    }
-
-    pub fn div(&self) -> u16 {
-        self.counter.now().wrapping_sub(self.div_epoch.get()) as u16
-    }
-    pub fn reset_div(&self) {
-        self.div_epoch.set(self.counter.now());
     }
 
     pub fn arm(&self, value: bool) {
@@ -794,20 +776,6 @@ mod tests {
 
         clock_tick(&mut clock, 4);
         assert_eq!(*order.borrow(), vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn div_is_derived_and_resettable() {
-        let mut clock = Time::new();
-
-        clock_tick(&mut clock, 0x120);
-        assert_eq!(clock.cpu.div(), 0x120);
-
-        clock.cpu.reset_div();
-        assert_eq!(clock.cpu.div(), 0);
-
-        clock_tick(&mut clock, 8);
-        assert_eq!(clock.cpu.div(), 8);
     }
 
     #[test]

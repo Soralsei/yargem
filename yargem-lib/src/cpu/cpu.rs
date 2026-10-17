@@ -382,11 +382,15 @@ impl CpuTask {
                 // STOP => 2 bytes
                 self.fetch(Reg8::Z).await;
             }
+            // Maybe return some error for the non-deterministic stop glitch? idk
             //     if !self.ime {
             //         // Maybe
             //         return Err(StopGlitchError);
             //     }
+            self.bus.poke(0xFF04, 0); // value does not matter
             self.clock.switch_speed();
+
+            // Stop Cpu clock and reset DIV
             self.clock.stop();
 
             // The CPU sits out the next 2050 M-cycles
@@ -405,13 +409,14 @@ impl CpuTask {
         }
         // For both, enter STOP mode and reset DIV
         self.clock.stop();
+        self.bus.poke(0xFF04, 0); // value does not matter
+
         self.fixed_clock.stop();
         self.t
-            .after(
-                self.irq_listener
-                    .until(|| int_req & int_enabled & JOYPAD != 0),
-            )
+            .after(self.irq_listener.until(|| self.bus.peek(0xFF00) != 0x0F))
             .await;
+        self.clock.resume();
+        self.fixed_clock.resume();
     }
 
     pub async fn idle(&self) {

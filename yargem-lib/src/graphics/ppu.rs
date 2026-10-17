@@ -11,7 +11,7 @@ use crate::graphics::fifo::{BgFIFO, ObjFIFO, Pixel};
 use crate::graphics::registers::{ObjSize, PpuMode, PpuRegisters, TileAddressing, TileArea};
 use crate::memory::bus::{Bus, BusController, BusOwner};
 use crate::memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu};
-use crate::util::future::{Either, Race};
+use crate::util::future::Race;
 use crate::{is_bit_set, SCREEN_H, SCREEN_W};
 
 const OAM_SCAN_DOTS: u16 = 2;
@@ -156,20 +156,13 @@ impl Ppu {
                     .await;
             }
 
-            // The frame runs on a fork: its waits move the cursor as they are
-            // created, so a frame cut short leaves its fork on a deadline that
-            // never came. Only a finished frame is joined back; after a
-            // disable, the `after` above realigns `timeline` from the frame's
-            // start. The disable is polled first so a step due on the same dot
-            // does not run with the LCD already off.
-            let frame_timeline = timeline.fork();
             let lcd_off = pin!(lcdc
                 .until(|| !this.registers.borrow().lcdc().lcd_ppu_enable)
                 .raw_fut());
-            let frame = pin!(this.frame(&frame_timeline));
-            if let Either::Right(()) = Race::new(lcd_off, frame).await {
-                timeline.join(&frame_timeline);
-            }
+            let frame = pin!(this.frame(&timeline));
+            // The lcd_off future is polled first so a step due on the same dot
+            // does not run with the LCD already off (Race polls left -> right)
+            let _ = Race::new(lcd_off, frame).await;
         }
     }
 
@@ -341,9 +334,8 @@ impl Ppu {
         let start = timeline.position();
         let state = LineState::new(ly);
 
-        let (ft, st) = (timeline.fork(), timeline.fork());
-        let fetcher = pin!(self.fetcher(&state, ft.clone()));
-        let shifter = pin!(self.shifter(objects, &state, st.clone()));
+        let fetcher = pin!(self.fetcher(&state, timeline.fork()));
+        let shifter = pin!(self.shifter(objects, &state, timeline.clone()));
         // The fetcher never finishes: the line ends with the shifter.
         Race::new(fetcher, shifter).await;
 
@@ -351,7 +343,6 @@ impl Ppu {
             self.window_ly.set(self.window_ly.get() + 1);
         }
 
-        timeline.join(&st);
         timeline.position() - start
     }
 
@@ -714,6 +705,12 @@ mod tests {
                 self.time.tick();
             }
         }
+
+        fn ticks(&mut self, n: usize) {
+            for _ in 0..n {
+                self.time.tick();
+            }
+        }
     }
 
     /// LCDC 0x91: LCD on, BG on, tilemap 0x9800, tile data 0x8000.
@@ -839,5 +836,59 @@ mod tests {
             vec![2, 3, 0, 1, 2, 3, 0, 1],
             "SCX & 7 discard did not shift the line"
         );
+    }
+
+    /// The PPU wakes on the dot after `basic_bg`'s LCDC write, so line N, dot D
+    /// is tick 1 + N * 456 + D.
+    const LINE_10_MODE_3: usize = 1 + 10 * 456 + 90;
+
+    #[test]
+    fn lcd_off_mid_mode3_resets_on_next_dot() {
+        let mut h = basic_bg();
+
+        // Ticks to allow run_frame to run past the max number of cycles per frame
+        h.ticks(LINE_10_MODE_3);
+
+        assert_eq!(h.ppu.registers.borrow().ly(), 10);
+        assert_eq!(h.ppu.registers.borrow().stat().ppu_mode, PpuMode::Drawing);
+
+        // Disable LCD mid-frame
+        let mut lcdc = h.ppu.registers.borrow().lcdc();
+        lcdc.lcd_ppu_enable = false;
+
+        h.reg(0xFF40, lcdc.into());
+        h.ticks(1);
+
+        assert_eq!(h.ppu.registers.borrow().ly(), 0);
+        assert_eq!(h.ppu.registers.borrow().stat().ppu_mode, PpuMode::HBlank);
+
+        // Max cycles per frame
+        h.run_frame();
+
+        assert!(!h.ppu.take_frame_ready(), "A cancelled frame was presented");
+    }
+
+    #[test]
+    fn re_enabling_restarts_the_frame_on_the_next_dot() {
+        let mut h = basic_bg();
+        h.ticks(LINE_10_MODE_3);
+
+        // Disable LCD mid-frame
+        let mut lcdc = h.ppu.registers.borrow().lcdc();
+        lcdc.lcd_ppu_enable = false;
+        h.reg(0xFF40, lcdc.into());
+
+        h.ticks(3);
+
+        // Reenable LCD
+        lcdc = h.ppu.registers.borrow().lcdc();
+        lcdc.lcd_ppu_enable = true;
+        h.reg(0xFF40, lcdc.into());
+
+        // Restarts on the next dot; VBlank lands 144 lines after that.
+        h.ticks(144 * 456);
+        assert!(!h.ppu.take_frame_ready());
+        h.ticks(1);
+        assert!(h.ppu.take_frame_ready());
     }
 }
