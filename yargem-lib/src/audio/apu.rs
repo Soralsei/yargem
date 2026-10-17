@@ -1,11 +1,16 @@
-use std::{cell::RefCell, convert::Infallible, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    convert::Infallible,
+    ops::Div,
+    rc::Rc,
+};
 
 use crate::{
     audio::{
         channel::{Channel, Noise, Square, Wave},
         registers::AudioRegisters,
     },
-    clock::{EdgeListener, Fixed, Timeline},
+    clock::{Cycles, EdgeListener, Fixed, FixedClock, Timeline},
     is_bit_set,
     memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu},
     util::containers::CircularBuffer,
@@ -69,6 +74,7 @@ struct ApuState {
     is_powered: bool,
     registers: AudioRegisters,
     sequencer_step: u8,
+    generator_step: u8,
 
     ch1: Square,
     ch2: Square,
@@ -86,12 +92,16 @@ struct ApuState {
 }
 
 pub struct Apu {
+    fixed: Rc<FixedClock>,
+    last_step_at: Cell<Cycles>,
     state: RefCell<ApuState>,
 }
 
 impl Apu {
-    pub fn new(is_cgb: bool) -> Self {
+    pub fn new(fixed: Rc<FixedClock>, is_cgb: bool) -> Self {
         Self {
+            fixed,
+            last_step_at: 0.into(),
             state: RefCell::new(ApuState::new(is_cgb)),
         }
     }
@@ -119,6 +129,7 @@ impl Apu {
     pub async fn frame_sequencer_task(this: Rc<Self>, mut div_apu: EdgeListener) -> Infallible {
         loop {
             div_apu.next().raw_fut().await;
+            this.catch_up(this.fixed.now() - 1);
             this.state.borrow_mut().frame_step();
         }
     }
@@ -135,7 +146,22 @@ impl Apu {
         }
     }
 
+    fn batch_generate(&self, steps: Cycles) {
+        let mut state = self.state.borrow_mut();
+        for _ in 0..steps {
+            state.generator_step();
+        }
+        self.last_step_at.set(self.fixed.now());
+    }
+
+    fn catch_up(&self, through: Cycles) {
+        let n_steps = through.saturating_sub(self.last_step_at.get()).div(2);
+        self.batch_generate(n_steps);
+    }
+
     pub fn drain_samples(&self, max: usize, sink: impl FnMut([f32; 2])) {
+        self.catch_up(self.fixed.now());
+
         self.state
             .borrow_mut()
             .samples
@@ -157,6 +183,7 @@ impl ApuState {
             is_powered: false,
             registers: AudioRegisters::default(),
             sequencer_step: 0u8,
+            generator_step: 0u8,
             ch1: Square::ch1(),
             ch2: Square::ch2(),
             ch3: Wave::default(),
@@ -290,6 +317,10 @@ impl ApuState {
     pub fn generator_step(&mut self) {
         each_channel!(self, ch => ch.clock());
         self.mix();
+        if self.generator_step == 31 {
+            self.buffer_sample();
+        }
+        self.generator_step = (self.generator_step + 1) & 0x1F;
     }
 
     pub fn buffer_sample(&mut self) {
@@ -325,6 +356,7 @@ impl ApuState {
 
 impl MemoryHandler for Apu {
     fn read(&self, _: &Mmu, address: u16) -> MemoryRead {
+        self.catch_up(self.fixed.now());
         match address {
             0xFF26 => MemoryRead::Replace(self.state.borrow().read_nr52()),
             0xFF10..=0xFF23 => {
@@ -338,6 +370,7 @@ impl MemoryHandler for Apu {
     }
 
     fn write(&self, _: &Mmu, address: u16, value: u8) -> MemoryWrite {
+        self.catch_up(self.fixed.now());
         let mut state = self.state.borrow_mut();
         match (state.is_powered, address) {
             (_, 0xFF26) => {

@@ -409,6 +409,9 @@ impl FixedClock {
     fn timeline(&self) -> Timeline<Fixed> {
         self.0.timeline()
     }
+    pub fn now(&self) -> Cycles {
+        self.0.now()
+    }
     pub fn stop(&self) {
         self.0.stop();
     }

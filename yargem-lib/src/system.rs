@@ -84,7 +84,7 @@ impl System {
             bus_controller.clone(),
             is_cgb,
         ));
-        let apu = Rc::new(Apu::new(is_cgb));
+        let apu = Rc::new(Apu::new(time.fixed.clone(), is_cgb));
 
         let mut map = AddressMap::new();
 
@@ -136,7 +136,7 @@ impl System {
         time.spawn(|timeline| Timer::task(timer.clone(), timeline));
 
         time.spawn(|()| Apu::frame_sequencer_task(apu.clone(), timer.div_apu()));
-        time.spawn(|timeline| Apu::generator_task(apu.clone(), timeline));
+        // time.spawn(|timeline| Apu::generator_task(apu.clone(), timeline));
 
         let cpu_clock = time.cpu.clone();
         let fixed_clock = time.fixed.clone();
