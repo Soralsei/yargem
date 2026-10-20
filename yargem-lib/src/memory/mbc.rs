@@ -1,7 +1,11 @@
 #![allow(unused)]
 use std::cell::{Cell, RefCell};
 
-use crate::{is_bit_set, util::bit_operations::addressing_number_of_bits};
+use crate::{
+    is_bit_set,
+    memory::address::{BankResolver, PhysAddr, Region},
+    util::bit_operations::addressing_number_of_bits,
+};
 
 use super::mmu::{MemoryHandler, MemoryRead, MemoryWrite};
 use core::fmt;
@@ -60,6 +64,24 @@ impl MemoryBank for MbcType {
             MbcType::Mbc5(_) => todo!(),
             MbcType::Mbc6(_) => todo!(),
             MbcType::Mbc7(_) => todo!(),
+        }
+    }
+}
+
+impl BankResolver for MbcType {
+    fn resolve(&self, address: u16) -> Option<PhysAddr> {
+        match self {
+            MbcType::MbcNone(mbc_none) => Some(PhysAddr {
+                region: Region::Unbanked,
+                bank: 0,
+                offset: address,
+            }),
+            MbcType::Mbc1(mbc1) => mbc1.resolve(address),
+            MbcType::Mbc2(mbc_none) => todo!(),
+            MbcType::Mbc3(mbc_none) => todo!(),
+            MbcType::Mbc5(mbc_none) => todo!(),
+            MbcType::Mbc6(mbc_none) => todo!(),
+            MbcType::Mbc7(mbc_none) => todo!(),
         }
     }
 }
@@ -184,7 +206,7 @@ impl Mbc1 {
     }
 
     fn get_bank_num_mask(&self) -> usize {
-        let num_banks: usize = (self.rom.len() as f32 / ROM_BANK_SIZE as f32).ceil() as usize;
+        let num_banks: usize = self.rom.len().div_ceil(ROM_BANK_SIZE) as usize;
         let num_bits = addressing_number_of_bits(num_banks);
         // Should never occur, but just to be safe
         // avoids overflow
@@ -194,40 +216,47 @@ impl Mbc1 {
         }
         (1 << num_bits) - 1
     }
+
+    fn rom_bank(&self) -> u16 {
+        let bank_mask = self.get_bank_num_mask() as u8;
+        let corrected_bank1 = Mbc1::maybe_one_bank(self.rom_bank_number);
+        let bank2_number: u8 = if self.rom_needs_extended_banking() {
+            (self.ram_bank_number & 0b11) << 5
+        } else {
+            0
+        };
+
+        ((bank2_number | corrected_bank1) & bank_mask) as u16
+    }
+
+    fn ram_bank(&self) -> u16 {
+        // Should be 0b0[ram_bank_number & 0b11]00000
+        // ex: ram_bank_number = 0b10 => bank_number = 0b01000000
+        // ram_bank_number can only ever be in {0x00, 0x20, 0x40, 0x60}
+        (if self.advanced_mode && self.rom_needs_extended_banking() {
+            (self.ram_bank_number & 0b11) << 5
+        } else {
+            0
+        }) as u16
+    }
 }
 
 impl MemoryBank for Mbc1 {
     fn read(&self, address: u16) -> MemoryRead {
         match address {
             0x0000..=0x3FFF => {
-                // Should be 0b0[ram_bank_number & 0b11]00000
-                // ex: ram_bank_number = 0b10 => bank_number = 0b01000000
-                // bank_number can only ever be in the set = {0x00, 0x20, 0x40, 0x60}
-                let bank_number: usize = if self.advanced_mode && self.rom_needs_extended_banking()
-                {
-                    (self.ram_bank_number & 0b11) << 5
-                } else {
-                    0
-                } as usize;
+                let bank_number = self.ram_bank() as usize;
                 // bits 20 and 19 => bank_number, bits 18-14 => 0, bits 13-0 => address <= 0x3FFF
                 let bank_addr: usize = (bank_number * ROM_BANK_SIZE) | (address as usize);
                 MemoryRead::Replace(self.rom[bank_addr])
             }
             0x4000..=0x7FFF => {
-                let bank_mask = self.get_bank_num_mask() as u8;
-                let corrected_bank1 = Mbc1::maybe_one_bank(self.rom_bank_number);
-                let bank2_number: u8 = if self.rom_needs_extended_banking() {
-                    (self.ram_bank_number & 0b11) << 5
-                } else {
-                    0
-                };
-
-                let mut bank_number = (bank2_number | corrected_bank1) & bank_mask;
+                let bank_number = self.rom_bank() as usize;
                 // Get the address inside the selected bank
                 // strictly equivalent to bank_number * ROM_BANK_SIZE + (address - 0x4000)
-                let bank_addr: usize = (bank_number as usize * ROM_BANK_SIZE)
-                    | (address as usize & (ROM_BANK_SIZE - 1));
-
+                // println!("rom_bank_for() = {}", bank_number);
+                let bank_addr: usize =
+                    (bank_number * ROM_BANK_SIZE) | (address as usize & (ROM_BANK_SIZE - 1));
                 MemoryRead::Replace(self.rom[bank_addr])
             }
             0xA000..=0xBFFF => {
@@ -267,6 +296,40 @@ impl MemoryBank for Mbc1 {
                 MemoryWrite::Block
             }
             _ => unreachable!("Invalid memory write at address 0x{:04X}", address),
+        }
+    }
+}
+
+impl BankResolver for Mbc1 {
+    fn resolve(&self, address: u16) -> Option<PhysAddr> {
+        match address {
+            0x0000..=0x3FFF => {
+                let bank_number = self.ram_bank() as usize;
+                // bits 20 and 19 => bank_number, bits 18-14 => 0, bits 13-0 => address <= 0x3FFF
+                let bank_addr: usize = (bank_number * ROM_BANK_SIZE) | (address as usize);
+                None
+            }
+            0x4000..=0x7FFF => {
+                let bank_number = self.rom_bank() as usize;
+                // Get the address inside the selected bank
+                // strictly equivalent to bank_number * ROM_BANK_SIZE + (address - 0x4000)
+                let offset = (address as usize & (ROM_BANK_SIZE - 1));
+                let bank_addr: usize =
+                    (bank_number * ROM_BANK_SIZE) | (address as usize & (ROM_BANK_SIZE - 1));
+                None
+            }
+            0xA000..=0xBFFF => {
+                let offset = self.ram_offset(address);
+                match offset {
+                    Some(offset) => Some(PhysAddr {
+                        region: Region::Sram,
+                        bank: 0,
+                        offset: offset as u16,
+                    }),
+                    None => None,
+                }
+            }
+            _ => return None,
         }
     }
 }
