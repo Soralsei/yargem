@@ -1,11 +1,7 @@
 #![allow(unused)]
 use std::cell::{Cell, RefCell};
 
-use crate::{
-    is_bit_set,
-    memory::address::{BankResolver, PhysAddr, Region},
-    util::bit_operations::addressing_number_of_bits,
-};
+use crate::{is_bit_set, util::bit_operations::addressing_number_of_bits};
 
 use super::mmu::{MemoryHandler, MemoryRead, MemoryWrite};
 use core::fmt;
@@ -13,8 +9,8 @@ use core::fmt;
 const CGB: u8 = 7;
 const CGB_ONLY: u8 = 6;
 const ROM_SIZE: usize = 32 * 1024;
-const ROM_BANK_SIZE: usize = 16 * 1024;
 const RAM_BANK_SIZE: usize = 8 * 1024;
+const ROM_BANK_SIZE: usize = 16 * 1024;
 const MAX_ROM_SIZE_NORMAL: usize = 512 * 1024;
 
 trait MemoryBank {
@@ -64,24 +60,6 @@ impl MemoryBank for MbcType {
             MbcType::Mbc5(_) => todo!(),
             MbcType::Mbc6(_) => todo!(),
             MbcType::Mbc7(_) => todo!(),
-        }
-    }
-}
-
-impl BankResolver for MbcType {
-    fn resolve(&self, address: u16) -> Option<PhysAddr> {
-        match self {
-            MbcType::MbcNone(mbc_none) => Some(PhysAddr {
-                region: Region::Unbanked,
-                bank: 0,
-                offset: address,
-            }),
-            MbcType::Mbc1(mbc1) => mbc1.resolve(address),
-            MbcType::Mbc2(mbc_none) => todo!(),
-            MbcType::Mbc3(mbc_none) => todo!(),
-            MbcType::Mbc5(mbc_none) => todo!(),
-            MbcType::Mbc6(mbc_none) => todo!(),
-            MbcType::Mbc7(mbc_none) => todo!(),
         }
     }
 }
@@ -239,25 +217,31 @@ impl Mbc1 {
             0
         }) as u16
     }
+
+    fn bank0_offset(&self, address: u16) -> usize {
+        let bank_number = self.ram_bank() as usize;
+        // bits 20 and 19 => bank_number, bits 18-14 => 0, bits 13-0 => address <= 0x3FFF
+        (bank_number * ROM_BANK_SIZE) | (address as usize)
+    }
+
+    fn bank1_offset(&self, address: u16) -> usize {
+        let bank_number = self.rom_bank() as usize;
+        // Get the address inside the selected bank
+        // strictly equivalent to bank_number * ROM_BANK_SIZE + (address - 0x4000)
+        (bank_number * ROM_BANK_SIZE) | (address as usize & (ROM_BANK_SIZE - 1))
+    }
 }
 
 impl MemoryBank for Mbc1 {
     fn read(&self, address: u16) -> MemoryRead {
         match address {
             0x0000..=0x3FFF => {
-                let bank_number = self.ram_bank() as usize;
-                // bits 20 and 19 => bank_number, bits 18-14 => 0, bits 13-0 => address <= 0x3FFF
-                let bank_addr: usize = (bank_number * ROM_BANK_SIZE) | (address as usize);
-                MemoryRead::Replace(self.rom[bank_addr])
+                let offset = self.bank0_offset(address);
+                MemoryRead::Replace(self.rom[offset])
             }
             0x4000..=0x7FFF => {
-                let bank_number = self.rom_bank() as usize;
-                // Get the address inside the selected bank
-                // strictly equivalent to bank_number * ROM_BANK_SIZE + (address - 0x4000)
-                // println!("rom_bank_for() = {}", bank_number);
-                let bank_addr: usize =
-                    (bank_number * ROM_BANK_SIZE) | (address as usize & (ROM_BANK_SIZE - 1));
-                MemoryRead::Replace(self.rom[bank_addr])
+                let offset = self.bank1_offset(address);
+                MemoryRead::Replace(self.rom[offset])
             }
             0xA000..=0xBFFF => {
                 // Reads from disabled ram return open-bus values
@@ -296,40 +280,6 @@ impl MemoryBank for Mbc1 {
                 MemoryWrite::Block
             }
             _ => unreachable!("Invalid memory write at address 0x{:04X}", address),
-        }
-    }
-}
-
-impl BankResolver for Mbc1 {
-    fn resolve(&self, address: u16) -> Option<PhysAddr> {
-        match address {
-            0x0000..=0x3FFF => {
-                let bank_number = self.ram_bank() as usize;
-                // bits 20 and 19 => bank_number, bits 18-14 => 0, bits 13-0 => address <= 0x3FFF
-                let bank_addr: usize = (bank_number * ROM_BANK_SIZE) | (address as usize);
-                None
-            }
-            0x4000..=0x7FFF => {
-                let bank_number = self.rom_bank() as usize;
-                // Get the address inside the selected bank
-                // strictly equivalent to bank_number * ROM_BANK_SIZE + (address - 0x4000)
-                let offset = (address as usize & (ROM_BANK_SIZE - 1));
-                let bank_addr: usize =
-                    (bank_number * ROM_BANK_SIZE) | (address as usize & (ROM_BANK_SIZE - 1));
-                None
-            }
-            0xA000..=0xBFFF => {
-                let offset = self.ram_offset(address);
-                match offset {
-                    Some(offset) => Some(PhysAddr {
-                        region: Region::Sram,
-                        bank: 0,
-                        offset: offset as u16,
-                    }),
-                    None => None,
-                }
-            }
-            _ => return None,
         }
     }
 }

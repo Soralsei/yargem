@@ -30,7 +30,7 @@ pub enum MemoryRead {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryWrite {
-    Replace(u8),
+    // Replace(u8),
     Pass,
     Block,
 }
@@ -41,6 +41,9 @@ pub enum MemoryWrite {
 pub trait MemoryHandler {
     fn read(&self, mmu: &Mmu, address: u16) -> MemoryRead;
     fn write(&self, mmu: &Mmu, address: u16, value: u8) -> MemoryWrite;
+    fn enabled(&self) -> bool {
+        true
+    }
 }
 
 pub struct Mmu {
@@ -66,7 +69,10 @@ impl Mmu {
     /// The CPU reaches memory through `CpuBus`, which adds both.
     pub fn peek(&self, addr: u16) -> u8 {
         let handlers = &self.handlers.0;
-        for handler in handlers[addr as usize].iter() {
+        for handler in handlers[addr as usize]
+            .iter()
+            .filter(|handler| handler.enabled())
+        {
             match handler.read(self, addr) {
                 MemoryRead::Replace(value) => return value,
                 MemoryRead::Pass => (),
@@ -86,7 +92,10 @@ impl Mmu {
     pub fn poke(&self, addr: u16, value: u8) {
         let handlers = &self.handlers.0;
         let mut outcome = MemoryWrite::Pass;
-        for handler in handlers[addr as usize].iter() {
+        for handler in handlers[addr as usize]
+            .iter()
+            .filter(|handler| handler.enabled())
+        {
             match handler.write(self, addr, value) {
                 MemoryWrite::Pass => (),
                 decided => {
@@ -98,7 +107,7 @@ impl Mmu {
 
         let value = match outcome {
             MemoryWrite::Block => return,
-            MemoryWrite::Replace(replacement) => replacement,
+            // MemoryWrite::Replace(replacement) => replacement,
             MemoryWrite::Pass => value,
         };
 
