@@ -7,6 +7,7 @@ use std::{
 
 use super::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu};
 use crate::clock::{signal, Cpu, Listener, Raiser};
+use crate::memory::mmu::Next;
 use crate::{
     clock::{Cycles, Timeline},
     cpu::interrupt::InterruptRequest,
@@ -138,27 +139,26 @@ impl SerialState {
 }
 
 impl<S: ByteSink> MemoryHandler for Serial<S> {
-    fn read(&self, _: &Mmu, address: u16) -> MemoryRead {
+    fn read(&self, address: u16, _next: Next<'_>) -> u8 {
         self.state.borrow().read(address)
     }
 
-    fn write(&self, _: &Mmu, address: u16, value: u8) -> MemoryWrite {
-        let write = self.state.borrow_mut().write(address, value);
+    fn write(&self, address: u16, value: u8, _next: Next<'_>) {
+        self.state.borrow_mut().write(address, value);
         self.raiser.raise();
-        write
     }
 }
 
 impl SerialState {
-    fn read(&self, address: u16) -> MemoryRead {
+    fn read(&self, address: u16) -> u8 {
         match address {
-            0xFF01 => MemoryRead::Replace(self.send_byte),
-            0xFF02 => MemoryRead::Replace(self.get_sc()),
+            0xFF01 => self.send_byte,
+            0xFF02 => self.get_sc(),
             _ => unreachable!("Invalid serial read : 0x{:04X}", address),
         }
     }
 
-    fn write(&mut self, address: u16, value: u8) -> MemoryWrite {
+    fn write(&mut self, address: u16, value: u8) {
         match address {
             0xFF01 => {
                 self.send_byte = value;
@@ -168,6 +168,5 @@ impl SerialState {
             }
             _ => unreachable!("Invalid serial write : 0x{:04X}", address),
         }
-        MemoryWrite::Block
     }
 }

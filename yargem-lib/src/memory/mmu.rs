@@ -35,14 +35,57 @@ pub enum MemoryWrite {
     Block,
 }
 
+#[derive(Clone, Copy)]
+pub enum Source {
+    Cpu,
+    Dma,
+    Debugger,
+    Internal,
+}
+
+#[derive(Clone, Copy)]
+pub struct Next<'a> {
+    mmu: &'a Mmu,
+    rest: &'a [Rc<dyn MemoryHandler>],
+    source: Source,
+}
+
+impl Next<'_> {
+    pub fn read(self, addr: u16) -> u8 {
+        match self.rest.split_first() {
+            Some((handler, rest)) => handler.read(addr, Next { rest, ..self }),
+            None => self.mmu.ram_read(addr), // echo mapping + backing array
+        }
+    }
+
+    pub fn write(self, addr: u16, value: u8) {
+        match self.rest.split_first() {
+            Some((handler, rest)) => handler.write(addr, value, Next { rest, ..self }),
+            None => self.mmu.ram_write(addr, value),
+        }
+    }
+    pub fn source(&self) -> Source {
+        self.source
+    }
+    pub fn as_source(self, source: Source) -> Self {
+        Self { source, ..self }
+    }
+}
+
 /// A memory-mapped device. Handlers are shared (`Rc`) and keep their own
 /// interior mutability, so a bus access never needs a mutable borrow of the
 /// device and cannot conflict with that device being stepped by the clock.
 pub trait MemoryHandler {
-    fn read(&self, mmu: &Mmu, address: u16) -> MemoryRead;
-    fn write(&self, mmu: &Mmu, address: u16, value: u8) -> MemoryWrite;
-    fn enabled(&self) -> bool {
-        true
+    fn read(&self, address: u16, next: Next<'_>) -> u8 {
+        next.read(address)
+    }
+    fn write(&self, address: u16, value: u8, next: Next<'_>) {
+        next.write(address, value);
+    }
+
+    /// Returns the currently mapped bank (if any) at `addr`
+    fn bank_at(&self, _: u16) -> Option<u16> {
+        None
     }
 }
 
@@ -54,31 +97,38 @@ pub struct Mmu {
     /// of `[u8; 0x10000]`. Interior mutability is what lets the bus be shared as
     /// an `Rc<Mmu>`: a clocked device (OAM DMA, the PPU fetcher) only ever holds
     /// `&Mmu`, and still has to be able to drive a write.
-    memory: Box<[Cell<u8>]>,
+    memory: Box<[Cell<u8>; 0x10000]>,
 }
 
 impl Mmu {
     pub fn new(address_map: AddressMap) -> Mmu {
         Mmu {
             handlers: address_map,
-            memory: vec![Cell::new(0u8); 0x10000].into_boxed_slice(),
+            memory: vec![Cell::new(0u8); 0x10000]
+                .into_boxed_slice()
+                .try_into()
+                .expect("Mmu::new can't fail"),
         }
     }
 
     /// Read a byte. The address map only: no machine cycle, no arbitration.
     /// The CPU reaches memory through `CpuBus`, which adds both.
-    pub fn peek(&self, addr: u16) -> u8 {
-        let handlers = &self.handlers.0;
-        for handler in handlers[addr as usize]
-            .iter()
-            .filter(|handler| handler.enabled())
-        {
-            match handler.read(self, addr) {
-                MemoryRead::Replace(value) => return value,
-                MemoryRead::Pass => (),
-            }
+    pub fn read(&self, addr: u16, source: Source) -> u8 {
+        let maybe_handlers = self.handlers.0[addr as usize].split_first();
+        if let Some((handler, rest)) = maybe_handlers {
+            return handler.read(
+                addr,
+                Next {
+                    mmu: self,
+                    rest: rest,
+                    source,
+                },
+            );
         }
+        self.ram_read(addr)
+    }
 
+    pub fn ram_read(&self, addr: u16) -> u8 {
         match addr {
             // echo ram read
             0xE000..=0xFDFF => self.memory[(addr - 0x2000) as usize].get(),
@@ -89,33 +139,34 @@ impl Mmu {
 
     /// Write a byte. The address map only: no machine cycle, no arbitration.
     /// This is the path a clocked device uses to drive the bus it owns.
-    pub fn poke(&self, addr: u16, value: u8) {
-        let handlers = &self.handlers.0;
-        let mut outcome = MemoryWrite::Pass;
-        for handler in handlers[addr as usize]
-            .iter()
-            .filter(|handler| handler.enabled())
-        {
-            match handler.write(self, addr, value) {
-                MemoryWrite::Pass => (),
-                decided => {
-                    outcome = decided;
-                    break;
-                }
-            }
+    pub fn write(&self, addr: u16, value: u8, source: Source) {
+        let maybe_handlers = self.handlers.0[addr as usize].split_first();
+        if let Some((handler, rest)) = maybe_handlers {
+            return handler.write(
+                addr,
+                value,
+                Next {
+                    mmu: self,
+                    rest: rest,
+                    source,
+                },
+            );
         }
+        self.ram_write(addr, value);
+    }
 
-        let value = match outcome {
-            MemoryWrite::Block => return,
-            // MemoryWrite::Replace(replacement) => replacement,
-            MemoryWrite::Pass => value,
-        };
-
+    pub fn ram_write(&self, addr: u16, value: u8) {
         match addr {
             // echo ram write
             0xE000..=0xFDFF => self.memory[(addr - 0x2000) as usize].set(value),
             // normal ram write
             _ => self.memory[addr as usize].set(value),
         }
+    }
+
+    pub fn bank_at(&self, addr: u16) -> Option<u16> {
+        self.handlers.0[addr as usize]
+            .iter()
+            .find_map(|handler| handler.bank_at(addr))
     }
 }

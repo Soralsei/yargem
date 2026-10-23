@@ -9,7 +9,7 @@ use crate::{
     clock::{edge, Cpu, CpuClock, Cycles, EdgeListener, EdgeRaiser, Timeline, M_CYCLE},
     cpu::interrupt::InterruptRequest,
     is_bit_set,
-    memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite},
+    memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Next},
     util::future::Race,
 };
 const TAC_ENABLE: u8 = 2;
@@ -203,23 +203,18 @@ impl TimerState {
 }
 
 impl MemoryHandler for Timer {
-    fn read(&self, _: &crate::memory::mmu::Mmu, address: u16) -> crate::memory::mmu::MemoryRead {
+    fn read(&self, address: u16, _: Next<'_>) -> u8 {
         let state = self.state.borrow();
         match address {
-            0xFF04 => MemoryRead::Replace((self.div() >> 8) as u8),
-            0xFF05 => MemoryRead::Replace(state.tima),
-            0xFF06 => MemoryRead::Replace(state.tma),
-            0xFF07 => MemoryRead::Replace(state.tac),
-            _ => MemoryRead::Pass,
+            0xFF04 => (self.div() >> 8) as u8,
+            0xFF05 => state.tima,
+            0xFF06 => state.tma,
+            0xFF07 => state.tac,
+            _ => unreachable!("unhandled read in Timer at address {:04X}", address),
         }
     }
 
-    fn write(
-        &self,
-        _: &crate::memory::mmu::Mmu,
-        address: u16,
-        value: u8,
-    ) -> crate::memory::mmu::MemoryWrite {
+    fn write(&self, address: u16, value: u8, _: Next<'_>) {
         let mut state = self.state.borrow_mut();
         match address {
             0xFF04 => {
@@ -238,14 +233,13 @@ impl MemoryHandler for Timer {
                 let counter = self.div();
                 state.state_change(counter, counter, value & 0b111);
             }
-            _ => {}
+            _ => unreachable!("unhandled write in Timer at address {:04X}", address),
         }
         // DIV and TAC decide when the next edge falls, and either can arm a
         // reload through a glitch tick. TIMA and TMA never move a deadline.
         if matches!(address, 0xFF04 | 0xFF07) {
             self.writes.raise();
         }
-        MemoryWrite::Block
     }
 }
 

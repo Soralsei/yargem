@@ -7,7 +7,7 @@ use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
 use crate::memory::bus::{BusController, CpuBus};
-use crate::memory::mmu::{AddressMap, MemoryRead, MemoryWrite};
+use crate::memory::mmu::AddressMap;
 use crate::timer::Timer;
 
 use super::memory::mbc::Mbc;
@@ -27,24 +27,20 @@ const CYCLES_PER_FRAME: Cycles = 70224; // 154 lines * 456 T-cycles
 struct SpeedSwitch(Rc<CpuClock>);
 
 impl MemoryHandler for SpeedSwitch {
-    fn read(&self, _: &Mmu, _address: u16) -> MemoryRead {
-        MemoryRead::Replace(self.0.key1())
+    fn read(&self, _address: u16, _next: crate::memory::mmu::Next<'_>) -> u8 {
+        self.0.key1()
     }
 
-    fn write(&self, _: &Mmu, _address: u16, value: u8) -> MemoryWrite {
+    fn write(&self, _address: u16, value: u8, _next: crate::memory::mmu::Next<'_>) {
         self.0.arm(value & 1 != 0);
-        MemoryWrite::Block
     }
 }
 
 struct Unmapped;
 
 impl MemoryHandler for Unmapped {
-    fn read(&self, _: &Mmu, _: u16) -> MemoryRead {
-        MemoryRead::Replace(0xFF)
-    }
-    fn write(&self, _: &Mmu, _: u16, _: u8) -> MemoryWrite {
-        MemoryWrite::Block
+    fn read(&self, _address: u16, _next: crate::memory::mmu::Next<'_>) -> u8 {
+        0xFF
     }
 }
 

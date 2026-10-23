@@ -93,26 +93,26 @@ impl CpuBus {
         match self.bus_controller.conflict(address) {
             // Whoever owns the bus is driving it; the CPU sees their value.
             Some(conflict) => conflict,
-            None => self.mmu.peek(address),
+            None => self.mmu.read(address),
         }
     }
 
     pub fn write(&self, address: u16, value: u8) {
         if self.bus_controller.conflict(address).is_none() {
-            self.mmu.poke(address, value);
+            self.mmu.write(address, value);
         }
     }
 
     /// Inspect without arbitration, for the places the
     /// CPU reads state rather than driving the bus (STOP checking IE/IF/JOYP).
     pub fn peek(&self, address: u16) -> u8 {
-        self.mmu.peek(address)
+        self.mmu.read(address)
     }
 
     /// Write without arbitration, for the places
     /// the CPU alters state rather than driving the bus (STOP resetting DIV).
     pub fn poke(&self, address: u16, value: u8) {
-        self.mmu.poke(address, value);
+        self.mmu.write(address, value);
     }
 }
 

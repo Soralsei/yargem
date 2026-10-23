@@ -8,4 +8,6 @@ blaarg = [] # no dependencies
 debug = []
 
 [dependencies]
+bitvec = "1.1.1"
 common = { path = "../common" }
+slab = "0.4.12"
