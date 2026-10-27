@@ -18,6 +18,10 @@ impl Breakpoints {
     }
 
     pub fn remove(&mut self, bank_addr: BankAddr) {
-        self.breaks.retain(|b| *b != bank_addr);
+        self.breaks.remove(&bank_addr);
+    }
+
+    pub fn breaks(&self, addr: &BankAddr) -> bool {
+        self.breaks.contains(addr)
     }
 }

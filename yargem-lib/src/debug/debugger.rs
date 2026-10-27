@@ -6,7 +6,10 @@ use std::{
 use crate::{
     cpu::cpu::Cpu,
     debug::{
-        protocol::{StopReason, WatchId, WatchpointHit},
+        breakpoint::Breakpoints,
+        protocol::{
+            BankAddr, BankRange, DebugCommand, DebugEvent, StopReason, WatchId, WatchpointHit,
+        },
         watchpoint::{AccessKind, WatchSet, Watchpoint},
     },
     memory::mmu::{MemoryContext, MemoryHandler, Mmu, Source},
@@ -110,7 +113,8 @@ pub enum RunMode {
 }
 
 pub struct Debugger {
-    watches: Rc<WatchTap>,
+    watch_tap: Rc<WatchTap>,
+    breakpoints: Breakpoints,
     mode: RunMode,
     attached: bool,
 }
@@ -118,14 +122,15 @@ pub struct Debugger {
 impl Debugger {
     pub fn new(start_attached: bool, initial_mode: RunMode) -> Self {
         Self {
-            watches: Rc::new(WatchTap::new()),
+            watch_tap: Rc::new(WatchTap::new()),
+            breakpoints: Breakpoints::new(),
             mode: initial_mode,
             attached: start_attached,
         }
     }
 
     pub fn watch_tap(&self) -> Rc<WatchTap> {
-        self.watches.clone()
+        self.watch_tap.clone()
     }
 
     pub fn attach(&mut self) {
@@ -136,22 +141,22 @@ impl Debugger {
     pub fn detach(&mut self) {
         self.attached = false;
         self.mode = RunMode::Running;
-        self.watches.take_hit(); // stale hit would stop the next attach immediately
+        self.watch_tap.take_hit(); // stale hit would stop the next attach immediately
         self.sync_watches();
     }
 
     pub fn add_watch(&mut self, id: WatchId, watchpoint: Watchpoint) {
-        self.watches.add(id, watchpoint);
+        self.watch_tap.add(id, watchpoint);
         self.sync_watches();
     }
 
     pub fn remove_watch(&mut self, id: WatchId) {
-        self.watches.remove(id);
+        self.watch_tap.remove(id);
         self.sync_watches();
     }
 
     fn sync_watches(&mut self) {
-        self.watches.set_active(self.attached);
+        self.watch_tap.set_active(self.attached);
     }
 
     pub fn attached(&self) -> bool {
@@ -159,7 +164,7 @@ impl Debugger {
     }
 
     pub fn should_stop(&mut self, cpu: &Cpu, mmu: &Mmu) -> Option<StopReason> {
-        let reason = if let Some(hit) = self.watches.take_hit() {
+        let reason = if let Some(hit) = self.watch_tap.take_hit() {
             Some(StopReason::Watchpoint(hit))
         } else {
             match &mut self.mode {
@@ -175,5 +180,49 @@ impl Debugger {
             }
         };
         reason
+    }
+
+    pub fn should_break(&self, addr: &BankAddr) -> bool {
+        self.breakpoints.breaks(&addr)
+    }
+
+    pub fn paused(&self) -> bool {
+        matches!(self.mode, RunMode::Paused)
+    }
+
+    pub fn handle(&mut self, cmd: DebugCommand, pc: u16) -> Option<DebugEvent> {
+        let event = match cmd {
+            DebugCommand::Pause => {
+                self.mode = RunMode::PauseRequested;
+                Some(DebugEvent::Paused {
+                    reason: StopReason::UserPause,
+                    pc,
+                })
+            }
+            DebugCommand::Resume => {
+                self.mode = RunMode::Running;
+                None
+            }
+            DebugCommand::StepInstruction => {
+                self.mode = RunMode::Step { remaining: 1 };
+                None
+            }
+            DebugCommand::AddBreakpoint(bank_addr) => todo!(),
+            DebugCommand::AddWatchpoint {
+                id,
+                bank_range,
+                access,
+            } => {
+                let watchpoint = Watchpoint::new(bank_range.bank, bank_range.range, access);
+                self.add_watch(id, watchpoint);
+                None
+            }
+            DebugCommand::RemoveBreakpoint(bank_addr) => todo!(),
+            DebugCommand::RemoveWatchpoint(watch_id) => todo!(),
+            DebugCommand::ReadMemory { start, len } => todo!(),
+            DebugCommand::WriteMemory { addr, value } => todo!(),
+            DebugCommand::ReadRegisters => todo!(),
+        };
+        event
     }
 }

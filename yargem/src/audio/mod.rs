@@ -1,2 +1,2 @@
-mod manager;
+pub mod manager;
 pub mod resampler;

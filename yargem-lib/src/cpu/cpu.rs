@@ -86,6 +86,10 @@ impl Cpu {
     pub fn wedged(&self) -> bool {
         self.wedged.get()
     }
+
+    pub fn pc(&self) -> u16 {
+        self.registers.borrow().pc
+    }
 }
 
 pub struct CpuTask {

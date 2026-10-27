@@ -4,7 +4,7 @@ use std::rc::Rc;
 use crate::audio::apu::Apu;
 use crate::clock::{CpuClock, Cycles, Time};
 use crate::debug::debugger::{Debugger, RunMode};
-use crate::debug::protocol::StopReason;
+use crate::debug::protocol::{BankAddr, DebugCommand, DebugEvent, StopReason};
 use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
@@ -206,6 +206,16 @@ impl System {
         let mut done = 0;
         let mut mark = self.cpu.instr_count();
         while done < BUDGET {
+            if self.debugger.attached() {
+                let pc = self.pc();
+                let bank = self.mmu.bank_at(pc);
+                let addr = BankAddr { bank, address: pc };
+
+                if self.debugger.should_break(&addr) {
+                    return RunResult::Stopped(StopReason::Breakpoint(addr));
+                }
+            }
+
             let advanced = self.time.advance(CYCLES_PER_FRAME);
 
             if self.debugger.attached() && self.cpu.instr_count() != mark {
@@ -244,5 +254,17 @@ impl System {
         self.cpu.wedged()
             || self.time.stopped()
             || (self.cpu.halted() && self.irq.enabled() & 0x1F == 0)
+    }
+
+    pub fn pc(&self) -> u16 {
+        self.cpu.pc()
+    }
+
+    pub fn paused(&self) -> bool {
+        self.debugger.paused()
+    }
+
+    pub fn debug(&mut self, cmd: DebugCommand) -> Option<DebugEvent> {
+        self.debugger.handle(cmd, self.pc())
     }
 }

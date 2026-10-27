@@ -14,13 +14,14 @@ use yargem_lib::{
     Frame, SAMPLE_RATE, SCREEN_H, SCREEN_W,
 };
 
-pub type Sample = [f32; 2];
+use crate::audio::manager::{AudioSink, Sample};
+
+const FALLBACK_PACING: f64 = 70224.0 / 4194304.0;
 
 pub enum EngineCommand {
     Button(Button, bool),
     Debug(DebugCommand),
-    /// Fresh ring after an output device (re)start. `None`: no device.
-    AudioSink(Option<rtrb::Producer<Sample>>),
+    AudioSink(Option<AudioSink>),
 }
 
 pub struct EngineHandle {
@@ -49,12 +50,7 @@ impl Drop for EngineHandle {
     }
 }
 
-pub fn spawn_engine(
-    boot: Option<Vec<u8>>,
-    rom: Vec<u8>,
-    settings: Settings,
-    waterline: Arc<AtomicUsize>,
-) -> EngineHandle {
+pub fn spawn_engine(boot: Option<Vec<u8>>, rom: Vec<u8>, settings: Settings) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (ev_tx, ev_rx) = mpsc::channel();
     let (frame_in, frame_out) = triple_buffer::triple_buffer(&[0u8; SCREEN_W * SCREEN_H]);
@@ -69,7 +65,6 @@ pub fn spawn_engine(
                 events: ev_tx,
                 frames: frame_in,
                 audio: None, // arrives as AudioSink once a device is up
-                waterline,
             }
             .run()
         })
@@ -88,8 +83,7 @@ struct Engine {
     commands: mpsc::Receiver<EngineCommand>,
     events: mpsc::Sender<DebugEvent>,
     frames: triple_buffer::Input<Frame>,
-    audio: Option<rtrb::Producer<Sample>>,
-    waterline: Arc<AtomicUsize>,
+    audio: Option<AudioSink>,
 }
 
 impl Engine {
@@ -141,18 +135,20 @@ impl Engine {
     }
 
     fn pace(&mut self) {
-        let Some(audio) = &mut self.audio else {
-            // No device: nothing drains samples, so pace by wall clock instead.
+        let Some(sink) = &mut self.audio else {
+            thread::sleep(Duration::from_secs_f64(FALLBACK_PACING));
             return;
         };
-        self.sys.drain_audio(audio.slots(), |sample| {
-            let _ = audio.push(sample); // max = slots(), cannot overflow
+        if !sink.available() {
+            self.audio = None; // stream gone; main sends a new sink
+            return;
+        }
+        self.sys.drain_audio(sink.slots(), |sample| {
+            sink.push(sample); // max = slots(), cannot overflow
         });
-        let fill = audio.buffer().capacity() - audio.slots();
-        let waterline = self.waterline.load(Ordering::Relaxed);
-        if fill > waterline {
-            let excess = (fill - waterline) as f64 / SAMPLE_RATE as f64;
-            thread::sleep(Duration::from_secs_f64(excess));
+        let lag = sink.overfill();
+        if !lag.is_zero() {
+            thread::sleep(lag);
         }
     }
 }

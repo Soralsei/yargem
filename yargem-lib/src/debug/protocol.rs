@@ -2,7 +2,7 @@
 
 use std::ops::RangeInclusive;
 
-use crate::cpu::registers::Registers;
+use crate::{cpu::registers::Registers, debug::watchpoint::AccessKind};
 
 #[derive(Ord, Eq, PartialEq, PartialOrd)]
 pub struct BankAddr {
@@ -20,11 +20,21 @@ pub enum DebugCommand {
     Resume,
     StepInstruction,
     AddBreakpoint(BankAddr),
-    AddWatchpoint { id: WatchId, range: BankRange },
+    AddWatchpoint {
+        id: WatchId,
+        bank_range: BankRange,
+        access: AccessKind,
+    },
     RemoveBreakpoint(BankAddr), // breakpoint number
     RemoveWatchpoint(WatchId),
-    ReadMemory { start: u16, len: u16 },
-    WriteMemory { addr: u16, value: u8 },
+    ReadMemory {
+        start: u16,
+        len: u16,
+    },
+    WriteMemory {
+        addr: u16,
+        value: u8,
+    },
     ReadRegisters,
 }
 
