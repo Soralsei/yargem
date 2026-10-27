@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use crate::{
     cpu::interrupt::InterruptRequest,
-    memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite},
+    memory::mmu::{MemoryContext, MemoryHandler},
 };
 
 #[derive(Copy, Clone)]
@@ -111,26 +111,21 @@ impl JoypadHandler {
 }
 
 impl MemoryHandler for JoypadHandler {
-    fn read(&self, _: &crate::memory::mmu::Mmu, address: u16) -> crate::memory::mmu::MemoryRead {
+    fn read(&self, address: u16, _ctx: MemoryContext<'_>) -> u8 {
         if address == 0xFF00 {
-            return MemoryRead::Replace(self.joypad.get().get());
+            return self.joypad.get().get();
         }
         unreachable!("Invalid read in JoypadHandler at address 0x{:04X}", address)
     }
 
-    fn write(
-        &self,
-        _: &crate::memory::mmu::Mmu,
-        address: u16,
-        value: u8,
-    ) -> crate::memory::mmu::MemoryWrite {
+    fn write(&self, address: u16, value: u8, _ctx: MemoryContext<'_>) {
         if address == 0xFF00 {
             self.state_change(|joypad| joypad.select(value));
-            return MemoryWrite::Block;
+            return;
         }
         unreachable!(
-            "Invalid write in JoypadHandler at address 0x{:04X}, value 0x{:02X}",
-            address, value
+            "unhandled write in JoypadHandler at address 0x{:04X}",
+            address
         )
     }
 }

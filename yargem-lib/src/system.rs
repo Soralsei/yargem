@@ -3,10 +3,12 @@ use std::rc::Rc;
 
 use crate::audio::apu::Apu;
 use crate::clock::{CpuClock, Cycles, Time};
+use crate::debug::debugger::{Debugger, RunMode};
+use crate::debug::protocol::StopReason;
 use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
-use crate::memory::bus::{BusController, CpuBus};
+use crate::memory::bus::{Bus, CpuBus};
 use crate::memory::mmu::AddressMap;
 use crate::timer::Timer;
 
@@ -27,11 +29,11 @@ const CYCLES_PER_FRAME: Cycles = 70224; // 154 lines * 456 T-cycles
 struct SpeedSwitch(Rc<CpuClock>);
 
 impl MemoryHandler for SpeedSwitch {
-    fn read(&self, _address: u16, _next: crate::memory::mmu::Next<'_>) -> u8 {
+    fn read(&self, _address: u16, _next: crate::memory::mmu::MemoryContext<'_>) -> u8 {
         self.0.key1()
     }
 
-    fn write(&self, _address: u16, value: u8, _next: crate::memory::mmu::Next<'_>) {
+    fn write(&self, _address: u16, value: u8, _next: crate::memory::mmu::MemoryContext<'_>) {
         self.0.arm(value & 1 != 0);
     }
 }
@@ -39,26 +41,51 @@ impl MemoryHandler for SpeedSwitch {
 struct Unmapped;
 
 impl MemoryHandler for Unmapped {
-    fn read(&self, _address: u16, _next: crate::memory::mmu::Next<'_>) -> u8 {
+    fn read(&self, _address: u16, _next: crate::memory::mmu::MemoryContext<'_>) -> u8 {
         0xFF
+    }
+}
+
+pub enum RunResult {
+    Frame,
+    Idle,
+    Stopped(StopReason),
+}
+
+pub struct Settings {
+    pub is_cgb_override: bool,
+    pub debugger_attached: bool,
+    pub debugger_run_mode: RunMode,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            is_cgb_override: false,
+            debugger_attached: false,
+            debugger_run_mode: RunMode::Running,
+        }
     }
 }
 
 pub struct System {
     cpu: Rc<Cpu>,
+    mmu: Rc<Mmu>,
     irq: Rc<InterruptController>,
     ppu: Rc<Ppu>,
     apu: Rc<Apu>,
+    debugger: Debugger,
     time: Time,
     joypad: Rc<JoypadHandler>,
 }
 
 impl System {
-    pub fn new(boot_rom: Option<Vec<u8>>, rom: Vec<u8>, is_cgb_override: bool) -> Self {
+    pub fn new(boot_rom: Option<Vec<u8>>, rom: Vec<u8>, settings: Settings) -> Self {
         let mut time = Time::new();
+        let debugger = Debugger::new(settings.debugger_attached, settings.debugger_run_mode);
 
         let mbc = Rc::new(Mbc::new(boot_rom, rom));
-        let is_cgb = mbc.cartridge().is_cgb_only() || is_cgb_override;
+        let is_cgb = mbc.cartridge().is_cgb_only() || settings.is_cgb_override;
 
         let interrupt_controller = Rc::new(InterruptController::new());
         let serial = Rc::new(Serial::new(interrupt_controller.request(), LogSink));
@@ -69,25 +96,32 @@ impl System {
         ));
         let joypad = Rc::new(JoypadHandler::new(interrupt_controller.request()));
 
-        let bus_controller = Rc::new(BusController::new());
-        let dma = Rc::new(DMAController::new(bus_controller.clone()));
+        let bus = Rc::new(Bus::new());
+        let dma = Rc::new(DMAController::new(bus.clone()));
 
         // The bus is shared: the CPU drives it, and clocked devices that move
         // bytes themselves (OAM DMA, the PPU fetcher) need a handle to it too.
         let cpu = Rc::new(Cpu::new(is_cgb));
         let ppu = Rc::new(Ppu::new(
             interrupt_controller.request(),
-            bus_controller.clone(),
+            bus.clone(),
             is_cgb,
         ));
         let apu = Rc::new(Apu::new(time.fixed.clone(), is_cgb));
 
         let mut map = AddressMap::new();
 
+        map.add((0x0000, 0xFFFF), debugger.watch_tap());
+
+        map.add((0x0000, 0x7FFF), bus.clone());
+        map.add((0x8000, 0x9FFF), bus.clone());
+        map.add((0xA000, 0xFDFF), bus.clone());
+        map.add((0xFE00, 0xFE9F), bus.clone());
+
         #[cfg(feature = "blaarg")]
         {
             println!("Added blaarg debug feature");
-            mmu.add_handler((0xA000, 0xBFFF), Rc::new(BlaargSpy));
+            map.add((0xA000, 0xBFFF), Rc::new(BlaargSpy));
         }
 
         map.add((0x0000, 0x7FFF), mbc.clone());
@@ -132,7 +166,6 @@ impl System {
         time.spawn(|timeline| Timer::task(timer.clone(), timeline));
 
         time.spawn(|()| Apu::frame_sequencer_task(apu.clone(), timer.div_apu()));
-        // time.spawn(|timeline| Apu::generator_task(apu.clone(), timeline));
 
         let cpu_clock = time.cpu.clone();
         let fixed_clock = time.fixed.clone();
@@ -140,8 +173,8 @@ impl System {
         time.spawn(|(t_cpu, t_fixed)| {
             Cpu::task(
                 cpu.clone(),
+                CpuBus(mmu.clone()),
                 interrupt_controller.clone(),
-                CpuBus::new(mmu.clone(), bus_controller.clone()),
                 t_cpu,
                 t_fixed,
                 cpu_clock,
@@ -151,6 +184,8 @@ impl System {
 
         Self {
             cpu,
+            mmu,
+            debugger,
             irq: interrupt_controller,
             ppu,
             apu,
@@ -166,19 +201,31 @@ impl System {
         }
     }
 
-    pub fn run_frame(&mut self) {
+    pub fn run_frame(&mut self) -> RunResult {
         const BUDGET: Cycles = 2 * CYCLES_PER_FRAME;
         let mut done = 0;
+        let mut mark = self.cpu.instr_count();
         while done < BUDGET {
             let advanced = self.time.advance(CYCLES_PER_FRAME);
+
+            if self.debugger.attached() && self.cpu.instr_count() != mark {
+                mark = self.cpu.instr_count();
+                if let Some(reason) = self.debugger.should_stop(&self.cpu, &self.mmu) {
+                    return RunResult::Stopped(reason);
+                }
+            }
             // Both clocks are stalled, no point in running frames
             // nothing can happen on the system without outside action
             // or a frame can be displayed
-            if advanced == 0 || self.ppu.take_frame_ready() {
+            if advanced == 0 {
+                return RunResult::Idle;
+            }
+            if self.ppu.take_frame_ready() {
                 break;
             }
             done += advanced;
         }
+        RunResult::Frame
     }
 
     pub fn get_framebuffer(&self) -> Ref<'_, Frame> {

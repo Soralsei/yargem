@@ -1,4 +1,4 @@
-use yargem_lib::system::System;
+use yargem_lib::system::{Settings, System};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -12,7 +12,7 @@ fn main() {
         let f_boot_rom = std::fs::read(&args[2]);
         boot_rom = f_boot_rom.ok();
     }
-    let mut sys = System::new(boot_rom, rom, false);
+    let mut sys = System::new(boot_rom, rom, Settings::default());
     loop {
         sys.step();
     }

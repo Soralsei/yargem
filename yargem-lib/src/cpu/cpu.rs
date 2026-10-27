@@ -6,7 +6,7 @@ use std::rc::Rc;
 use super::registers::Registers;
 use crate::clock::{self, CpuClock, FixedClock, Listener, Timeline, M_CYCLE};
 use crate::cpu::instructions::{execute_prefixed, execute_unprefixed};
-use crate::cpu::interrupt::{InterruptController, JOYPAD};
+use crate::cpu::interrupt::InterruptController;
 use crate::cpu::registers::{Flags, Reg16, Reg8};
 use crate::memory::bus::CpuBus;
 use crate::util::bit_operations::*;
@@ -45,8 +45,8 @@ impl Cpu {
 
     pub async fn task(
         cpu: Rc<Cpu>,
-        irq: Rc<InterruptController>,
         bus: CpuBus,
+        irq: Rc<InterruptController>,
         t: Timeline<clock::Cpu>,
         t_fixed: Timeline<clock::Fixed>,
         clock: Rc<CpuClock>,
@@ -57,8 +57,8 @@ impl Cpu {
             t_fixed,
             irq_listener: irq.take_listener(),
             cpu,
-            irq,
             bus,
+            irq,
             clock,
             fixed_clock,
         };
@@ -90,9 +90,9 @@ impl Cpu {
 
 pub struct CpuTask {
     cpu: Rc<Cpu>,
+    bus: CpuBus,
     irq: Rc<InterruptController>,
     irq_listener: Listener,
-    bus: CpuBus,
     clock: Rc<CpuClock>,
     fixed_clock: Rc<FixedClock>,
     t: Timeline<clock::Cpu>,
@@ -127,6 +127,8 @@ impl CpuTask {
     }
 
     async fn execute(&mut self) {
+        self.cpu.instr.set(self.cpu.instr.get() + 1);
+
         self.fetch(Reg8::Z).await;
         let opcode = self.registers().z;
         match opcode {
@@ -137,7 +139,6 @@ impl CpuTask {
             }
             _ => execute_unprefixed(self, opcode).await,
         }
-        self.cpu.instr.set(self.cpu.instr.get() + 1);
     }
 
     async fn service(&self, vector: u8) {

@@ -1,13 +1,13 @@
 use std::time::Instant;
 
-use yargem_lib::system::System;
+use yargem_lib::system::{Settings, System};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let rom = std::fs::read(&args[1]).expect("rom");
     let frames: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(120);
 
-    let mut sys = System::new(None, rom, false);
+    let mut sys = System::new(None, rom, Settings::default());
     let mut frame_times = Vec::with_capacity(frames);
     for _ in 0..frames {
         let t1 = Instant::now();

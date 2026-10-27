@@ -22,19 +22,6 @@ impl AddressMap {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryRead {
-    Replace(u8),
-    Pass,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryWrite {
-    // Replace(u8),
-    Pass,
-    Block,
-}
-
 #[derive(Clone, Copy)]
 pub enum Source {
     Cpu,
@@ -44,29 +31,33 @@ pub enum Source {
 }
 
 #[derive(Clone, Copy)]
-pub struct Next<'a> {
-    mmu: &'a Mmu,
-    rest: &'a [Rc<dyn MemoryHandler>],
-    source: Source,
+pub struct MemoryContext<'a> {
+    pub mmu: &'a Mmu,
+    pub next: &'a [Rc<dyn MemoryHandler>],
+    pub source: Source,
 }
 
-impl Next<'_> {
+impl MemoryContext<'_> {
     pub fn read(self, addr: u16) -> u8 {
-        match self.rest.split_first() {
-            Some((handler, rest)) => handler.read(addr, Next { rest, ..self }),
+        match self.next.split_first() {
+            Some((handler, rest)) => handler.read(addr, MemoryContext { next: rest, ..self }),
             None => self.mmu.ram_read(addr), // echo mapping + backing array
         }
     }
 
     pub fn write(self, addr: u16, value: u8) {
-        match self.rest.split_first() {
-            Some((handler, rest)) => handler.write(addr, value, Next { rest, ..self }),
+        match self.next.split_first() {
+            Some((handler, rest)) => {
+                handler.write(addr, value, MemoryContext { next: rest, ..self })
+            }
             None => self.mmu.ram_write(addr, value),
         }
     }
+
     pub fn source(&self) -> Source {
         self.source
     }
+
     pub fn as_source(self, source: Source) -> Self {
         Self { source, ..self }
     }
@@ -76,11 +67,11 @@ impl Next<'_> {
 /// interior mutability, so a bus access never needs a mutable borrow of the
 /// device and cannot conflict with that device being stepped by the clock.
 pub trait MemoryHandler {
-    fn read(&self, address: u16, next: Next<'_>) -> u8 {
-        next.read(address)
+    fn read(&self, address: u16, context: MemoryContext<'_>) -> u8 {
+        context.read(address)
     }
-    fn write(&self, address: u16, value: u8, next: Next<'_>) {
-        next.write(address, value);
+    fn write(&self, address: u16, value: u8, context: MemoryContext<'_>) {
+        context.write(address, value);
     }
 
     /// Returns the currently mapped bank (if any) at `addr`
@@ -118,9 +109,9 @@ impl Mmu {
         if let Some((handler, rest)) = maybe_handlers {
             return handler.read(
                 addr,
-                Next {
+                MemoryContext {
                     mmu: self,
-                    rest: rest,
+                    next: rest,
                     source,
                 },
             );
@@ -145,9 +136,9 @@ impl Mmu {
             return handler.write(
                 addr,
                 value,
-                Next {
+                MemoryContext {
                     mmu: self,
-                    rest: rest,
+                    next: rest,
                     source,
                 },
             );

@@ -5,8 +5,8 @@ use std::{cell::Cell, convert::Infallible, rc::Rc};
 use crate::{
     clock::{signal, Cpu, Cycles, Listener, Raiser, Timeline, M_CYCLE},
     memory::{
-        bus::{Bus, BusController, BusOwner},
-        mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu},
+        bus::{Bus, BusOwner, BusType},
+        mmu::{MemoryContext, MemoryHandler, Mmu, Source},
     },
 };
 
@@ -31,7 +31,7 @@ impl DMAState {
 }
 
 pub struct DMAController {
-    bus_controller: Rc<BusController>,
+    bus_controller: Rc<Bus>,
     state: DMAState,
     raiser: Raiser,
     /// Taken by the task when it starts: it is the only consumer.
@@ -39,10 +39,10 @@ pub struct DMAController {
 }
 
 impl DMAController {
-    pub fn new(bus_controller: Rc<BusController>) -> Self {
+    pub fn new(bus: Rc<Bus>) -> Self {
         let (raiser, listener) = signal();
         Self {
-            bus_controller,
+            bus_controller: bus,
             state: DMAState::new(),
             raiser,
             listener: Cell::new(Some(listener)),
@@ -65,14 +65,14 @@ impl DMAController {
                 timeline.wait(M_CYCLE as Cycles).await;
                 // resume checkpoint for save states go here
                 // ...
-                let value = mmu.peek(src_addr);
+                let value = mmu.read(src_addr, Source::Dma);
 
                 // Idempotent
-                this.bus_controller.seize(Bus::Oam, BusOwner::Dma, 0xFF);
+                this.bus_controller.seize(BusType::Oam, BusOwner::Dma, 0xFF);
                 this.bus_controller
                     .seize_bus_of(src_addr, BusOwner::Dma, value);
 
-                mmu.poke(0xFE00 | offset, value);
+                mmu.write(0xFE00 | offset, value, Source::Dma);
 
                 if this.state.requested.get() {
                     // Restart DMA transfer if transfer enabled in the middle of another transfer
@@ -81,20 +81,20 @@ impl DMAController {
                 }
             }
             this.bus_controller.release_bus_for(src, BusOwner::Dma);
-            this.bus_controller.release(Bus::Oam, BusOwner::Dma);
+            this.bus_controller.release(BusType::Oam, BusOwner::Dma);
         }
     }
 }
 
 impl MemoryHandler for DMAController {
-    fn read(&self, _: &Mmu, address: u16) -> MemoryRead {
+    fn read(&self, address: u16, _: MemoryContext<'_>) -> u8 {
         if address != 0xFF46 {
             unreachable!("Invalid read in DMAController at address 0x{:04X}", address)
         }
-        MemoryRead::Replace(self.state.src_addr_reg.get())
+        self.state.src_addr_reg.get()
     }
 
-    fn write(&self, _: &Mmu, address: u16, value: u8) -> MemoryWrite {
+    fn write(&self, address: u16, value: u8, _: MemoryContext<'_>) {
         if address != 0xFF46 {
             unreachable!(
                 "Invalid write in DMAController at address 0x:{:04X}",
@@ -105,8 +105,6 @@ impl MemoryHandler for DMAController {
         self.state.src_addr_reg.set(value);
         self.state.requested.set(true);
         self.raiser.raise();
-
-        MemoryWrite::Block
     }
 }
 
@@ -124,13 +122,13 @@ mod tests {
     struct Harness {
         time: Time,
         mmu: Rc<Mmu>,
-        bus: Rc<BusController>,
+        bus: Rc<Bus>,
     }
 
     impl Harness {
         fn new() -> Self {
             let mut time = Time::new();
-            let bus = Rc::new(BusController::new());
+            let bus = Rc::new(Bus::new());
             let dma = Rc::new(DMAController::new(bus.clone()));
             let mut map = AddressMap::new();
             map.add((0xFF46, 0xFF46), dma.clone());
@@ -144,14 +142,15 @@ mod tests {
         fn fill(&self, page: u8, base: u8) {
             for offset in 0..0xA0u16 {
                 let address = (page as u16) << 8 | offset;
-                self.mmu.poke(address, base.wrapping_add(offset as u8));
+                self.mmu
+                    .write(address, base.wrapping_add(offset as u8), Source::Dma);
             }
         }
 
         /// Called between ticks on an M-cycle boundary, which is where the CPU
         /// writes: after the DMA's poll for that cycle.
         fn start(&self, page: u8) {
-            self.mmu.poke(0xFF46, page);
+            self.mmu.write(0xFF46, page, Source::Dma);
         }
 
         fn m_cycles(&mut self, n: u32) {
@@ -161,7 +160,7 @@ mod tests {
         }
 
         fn oam(&self, offset: u16) -> u8 {
-            self.mmu.peek(0xFE00 + offset)
+            self.mmu.read(0xFE00 + offset, Source::Dma)
         }
 
         fn locked(&self, address: u16) -> bool {

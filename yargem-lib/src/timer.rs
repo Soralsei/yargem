@@ -9,7 +9,7 @@ use crate::{
     clock::{edge, Cpu, CpuClock, Cycles, EdgeListener, EdgeRaiser, Timeline, M_CYCLE},
     cpu::interrupt::InterruptRequest,
     is_bit_set,
-    memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Next},
+    memory::mmu::{MemoryContext, MemoryHandler},
     util::future::Race,
 };
 const TAC_ENABLE: u8 = 2;
@@ -203,7 +203,7 @@ impl TimerState {
 }
 
 impl MemoryHandler for Timer {
-    fn read(&self, address: u16, _: Next<'_>) -> u8 {
+    fn read(&self, address: u16, _: MemoryContext<'_>) -> u8 {
         let state = self.state.borrow();
         match address {
             0xFF04 => (self.div() >> 8) as u8,
@@ -214,7 +214,7 @@ impl MemoryHandler for Timer {
         }
     }
 
-    fn write(&self, address: u16, value: u8, _: Next<'_>) {
+    fn write(&self, address: u16, value: u8, _: MemoryContext<'_>) {
         let mut state = self.state.borrow_mut();
         match address {
             0xFF04 => {
@@ -248,7 +248,7 @@ mod tests {
     use super::*;
     use crate::clock::Time;
     use crate::cpu::interrupt::InterruptController;
-    use crate::memory::mmu::{AddressMap, Mmu};
+    use crate::memory::mmu::{AddressMap, Mmu, Source};
 
     /// Drives the timer alone. Registers go through its own handler between
     /// ticks, which is where the CPU writes: after the timer's poll for that
@@ -267,31 +267,35 @@ mod tests {
             let irq = Rc::new(InterruptController::new());
             let timer = Rc::new(Timer::new(irq.request(), time.cpu.clone(), false));
             let t = timer.clone();
+            let mmu = Mmu::new(AddressMap::new());
             time.spawn(move |timeline: Timeline<Cpu>| Timer::task(t, timeline));
             Self {
                 time,
                 timer,
                 irq,
-                mmu: Mmu::new(AddressMap::new()),
+                mmu,
+            }
+        }
+
+        fn next(&self) -> MemoryContext<'_> {
+            MemoryContext {
+                mmu: &self.mmu,
+                next: &[],
+                source: Source::Cpu,
             }
         }
 
         fn write(&self, address: u16, value: u8) {
-            let _ = self.timer.write(&self.mmu, address, value);
+            let _ = self.timer.write(address, value, self.next());
         }
 
         fn tima(&self) -> u8 {
-            match self.timer.read(&self.mmu, 0xFF05) {
-                MemoryRead::Replace(value) => value,
-                MemoryRead::Pass => unreachable!(),
-            }
+            self.timer.read(0xFF05, self.next())
         }
 
         fn timer_irq(&self) -> bool {
-            match self.irq.read(&self.mmu, 0xFF0F) {
-                MemoryRead::Replace(flags) => flags & 0b100 != 0,
-                MemoryRead::Pass => unreachable!(),
-            }
+            let flags = self.irq.read(0xFF0F, self.next());
+            flags & 0b100 != 0
         }
 
         fn ticks(&mut self, n: u32) {

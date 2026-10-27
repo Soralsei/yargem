@@ -1,9 +1,11 @@
 #![allow(unused)]
 use std::cell::{Cell, RefCell};
 
-use crate::{is_bit_set, util::bit_operations::addressing_number_of_bits};
+use crate::{
+    is_bit_set, memory::mmu::MemoryContext, util::bit_operations::addressing_number_of_bits,
+};
 
-use super::mmu::{MemoryHandler, MemoryRead, MemoryWrite};
+use super::mmu::MemoryHandler;
 use core::fmt;
 
 const CGB: u8 = 7;
@@ -13,9 +15,12 @@ const RAM_BANK_SIZE: usize = 8 * 1024;
 const ROM_BANK_SIZE: usize = 16 * 1024;
 const MAX_ROM_SIZE_NORMAL: usize = 512 * 1024;
 
-trait MemoryBank {
-    fn read(&self, address: u16) -> MemoryRead;
-    fn write(&mut self, address: u16, value: u8) -> MemoryWrite;
+trait BankedMemHandler {
+    fn read(&self, address: u16) -> u8;
+    fn write(&mut self, address: u16, value: u8);
+    fn bank_at(&self, address: u16) -> Option<u16> {
+        None
+    }
 }
 
 enum MbcType {
@@ -38,8 +43,8 @@ impl MbcType {
     }
 }
 
-impl MemoryBank for MbcType {
-    fn read(&self, address: u16) -> MemoryRead {
+impl BankedMemHandler for MbcType {
+    fn read(&self, address: u16) -> u8 {
         match self {
             MbcType::MbcNone(mbc) => mbc.read(address),
             MbcType::Mbc1(mbc) => mbc.read(address),
@@ -51,10 +56,22 @@ impl MemoryBank for MbcType {
         }
     }
 
-    fn write(&mut self, address: u16, value: u8) -> MemoryWrite {
+    fn write(&mut self, address: u16, value: u8) {
         match self {
             MbcType::MbcNone(mbc) => mbc.write(address, value),
             MbcType::Mbc1(mbc) => mbc.write(address, value),
+            MbcType::Mbc2(_) => todo!(),
+            MbcType::Mbc3(_) => todo!(),
+            MbcType::Mbc5(_) => todo!(),
+            MbcType::Mbc6(_) => todo!(),
+            MbcType::Mbc7(_) => todo!(),
+        }
+    }
+
+    fn bank_at(&self, address: u16) -> Option<u16> {
+        match self {
+            MbcType::MbcNone(mbc) => mbc.bank_at(address),
+            MbcType::Mbc1(mbc) => mbc.bank_at(address),
             MbcType::Mbc2(_) => todo!(),
             MbcType::Mbc3(_) => todo!(),
             MbcType::Mbc5(_) => todo!(),
@@ -97,21 +114,21 @@ impl MbcNone {
     }
 }
 
-impl MemoryBank for MbcNone {
-    fn read(&self, address: u16) -> MemoryRead {
+impl BankedMemHandler for MbcNone {
+    fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x7FFF => MemoryRead::Replace(self.rom[address as usize]),
+            0x0000..=0x7FFF => self.rom[address as usize],
             0xA000..=0xBFFF => {
                 if !self.has_ram() {
-                    return MemoryRead::Replace(0xFF);
+                    return 0xFF;
                 }
-                MemoryRead::Replace(self.ram[address as usize & (RAM_BANK_SIZE - 1)])
+                self.ram[address as usize & (RAM_BANK_SIZE - 1)]
             }
             _ => unreachable!("Invalid read in MbcNone at address 0x{:04X}", address),
         }
     }
 
-    fn write(&mut self, address: u16, value: u8) -> MemoryWrite {
+    fn write(&mut self, address: u16, value: u8) {
         match address {
             0..=0x7FFF => (),
             0xA000..=0xBFFF => {
@@ -121,7 +138,6 @@ impl MemoryBank for MbcNone {
             }
             _ => unreachable!("Invalid memory write at address 0x{:04X}", address),
         }
-        MemoryWrite::Block
     }
 }
 
@@ -212,14 +228,14 @@ impl Mbc1 {
         // ex: ram_bank_number = 0b10 => bank_number = 0b01000000
         // ram_bank_number can only ever be in {0x00, 0x20, 0x40, 0x60}
         (if self.advanced_mode && self.rom_needs_extended_banking() {
-            (self.ram_bank_number & 0b11) << 5
+            (self.ram_bank_number & 0b11)
         } else {
             0
         }) as u16
     }
 
     fn bank0_offset(&self, address: u16) -> usize {
-        let bank_number = self.ram_bank() as usize;
+        let bank_number = (self.ram_bank() << 5) as usize;
         // bits 20 and 19 => bank_number, bits 18-14 => 0, bits 13-0 => address <= 0x3FFF
         (bank_number * ROM_BANK_SIZE) | (address as usize)
     }
@@ -232,16 +248,16 @@ impl Mbc1 {
     }
 }
 
-impl MemoryBank for Mbc1 {
-    fn read(&self, address: u16) -> MemoryRead {
+impl BankedMemHandler for Mbc1 {
+    fn read(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x3FFF => {
                 let offset = self.bank0_offset(address);
-                MemoryRead::Replace(self.rom[offset])
+                self.rom[offset]
             }
             0x4000..=0x7FFF => {
                 let offset = self.bank1_offset(address);
-                MemoryRead::Replace(self.rom[offset])
+                self.rom[offset]
             }
             0xA000..=0xBFFF => {
                 // Reads from disabled ram return open-bus values
@@ -249,37 +265,43 @@ impl MemoryBank for Mbc1 {
                     Some(offset) => self.ram[offset],
                     None => 0xFF,
                 };
-                MemoryRead::Replace(read_value)
+                read_value
             }
             _ => unreachable!("Invalid memory read at address 0x{:04X}", address),
         }
     }
 
-    fn write(&mut self, address: u16, value: u8) -> MemoryWrite {
+    fn write(&mut self, address: u16, value: u8) {
         match address {
             0x0000..=0x1FFF => {
                 self.ram_enable = value & 0b1111 == 0xA;
-                MemoryWrite::Block
             }
             0x2000..=0x3FFF => {
                 self.rom_bank_number = value & 0b11111;
-                MemoryWrite::Block
             }
             0x4000..=0x5FFF => {
                 self.ram_bank_number = value & 0b11;
-                MemoryWrite::Block
             }
             0x6000..=0x7FFF => {
                 self.advanced_mode = value & 0b1 != 0;
-                MemoryWrite::Block
             }
             0xA000..=0xBFFF => {
                 if let Some(offset) = self.ram_offset(address) {
                     self.ram[offset] = value;
                 }
-                MemoryWrite::Block
             }
             _ => unreachable!("Invalid memory write at address 0x{:04X}", address),
+        }
+    }
+
+    fn bank_at(&self, address: u16) -> Option<u16> {
+        match address {
+            0x0000..=0x3FFF | 0xA000..=0xBFFF => Some(self.ram_bank()),
+            0x4000..=0x7FFF => Some(self.rom_bank()),
+            _ => unreachable!(
+                "unhandled bank resolution in MBC1 at address 0x{:04X}",
+                address
+            ),
         }
     }
 }
@@ -331,15 +353,17 @@ impl Cartridge {
     pub fn is_cgb_only(&self) -> bool {
         self.cgb_only
     }
-}
 
-impl MemoryHandler for Cartridge {
-    fn read(&self, mmu: &super::mmu::Mmu, address: u16) -> MemoryRead {
+    fn read(&self, address: u16) -> u8 {
         self.mbc.borrow().read(address)
     }
 
-    fn write(&self, mmu: &super::mmu::Mmu, address: u16, value: u8) -> MemoryWrite {
+    fn write(&self, address: u16, value: u8) {
         self.mbc.borrow_mut().write(address, value)
+    }
+
+    fn bank_at(&self, address: u16) -> Option<u16> {
+        self.mbc.borrow().bank_at(address)
     }
 }
 
@@ -400,21 +424,25 @@ impl Mbc {
 }
 
 impl MemoryHandler for Mbc {
-    fn read(&self, mmu: &super::mmu::Mmu, address: u16) -> MemoryRead {
+    fn read(&self, address: u16, _next: MemoryContext<'_>) -> u8 {
         if self.boot_rom_enabled.get() && self.in_boot_rom(address) {
-            return MemoryRead::Replace(self.boot_rom[address as usize]);
+            return self.boot_rom[address as usize];
         }
-        self.cart.read(mmu, address)
+        self.cart.read(address)
     }
 
-    fn write(&self, mmu: &super::mmu::Mmu, address: u16, value: u8) -> MemoryWrite {
+    fn write(&self, address: u16, value: u8, _next: MemoryContext<'_>) {
         if self.boot_rom_enabled.get() && self.in_boot_rom(address) {
             eprintln!("Write to boot rom detected ?!");
-            return MemoryWrite::Block;
+            return;
         } else if address == 0xFF50 {
             self.boot_rom_enabled.set(false);
-            return MemoryWrite::Block;
+            return;
         }
-        self.cart.write(mmu, address, value)
+        self.cart.write(address, value)
+    }
+
+    fn bank_at(&self, address: u16) -> Option<u16> {
+        self.cart.bank_at(address)
     }
 }

@@ -1,4 +1,4 @@
-use yargem_lib::system::System;
+use yargem_lib::system::{Settings, System};
 use yargem_lib::{SCREEN_H, SCREEN_W};
 
 fn main() {
@@ -6,7 +6,7 @@ fn main() {
     let rom = std::fs::read(&args[1]).expect("rom");
     let frames: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(120);
 
-    let mut sys = System::new(None, rom, false);
+    let mut sys = System::new(None, rom, Settings::default());
     for _ in 0..frames {
         sys.run_frame();
     }

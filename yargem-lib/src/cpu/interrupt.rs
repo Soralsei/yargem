@@ -3,7 +3,7 @@ use std::{cell::Cell, rc::Rc};
 use crate::{
     clock::{signal, Listener, Raiser},
     is_bit_set,
-    memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu},
+    memory::mmu::{MemoryContext, MemoryHandler},
 };
 
 pub const VBLANK: u8 = 0;
@@ -174,34 +174,34 @@ impl InterruptController {
 }
 
 impl MemoryHandler for InterruptController {
-    fn read(&self, _: &Mmu, address: u16) -> MemoryRead {
+    fn read(&self, address: u16, _next: MemoryContext<'_>) -> u8 {
         match address {
-            0xffff => MemoryRead::Replace(self.enable.get()),
-            0xff0f => MemoryRead::Replace(self.flags.get()),
+            0xffff => self.enable.get(),
+            0xff0f => self.flags.get(),
             _ => {
-                #[cfg(feature = "debug")]
-                println!("IC received weird read to address 0x{:04X}", address);
-                MemoryRead::Pass
+                unreachable!(
+                    "Unhandled read in InterruptController at address 0x{:04X}",
+                    address
+                );
             }
         }
     }
 
-    fn write(&self, _: &Mmu, address: u16, value: u8) -> MemoryWrite {
+    fn write(&self, address: u16, value: u8, _next: MemoryContext<'_>) {
         match address {
             0xffff => {
                 self.enable.set(value);
                 self.raiser.raise();
-                MemoryWrite::Block
             }
             0xff0f => {
                 self.flags.set(value);
                 self.raiser.raise();
-                MemoryWrite::Block
             }
             _ => {
-                #[cfg(feature = "debug")]
-                println!("IC received weird write to address 0x{:04X}", address);
-                MemoryWrite::Pass
+                unreachable!(
+                    "Unhandled write in InterruptController at address 0x{:04X}",
+                    address
+                );
             }
         }
     }

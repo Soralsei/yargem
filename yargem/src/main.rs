@@ -8,7 +8,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
 
 use yargem_lib::input::Button;
-use yargem_lib::system::System;
+use yargem_lib::system::{RunResult, Settings, System};
 use yargem_lib::{SAMPLE_RATE, SCREEN_H, SCREEN_W};
 
 const DMG: [u32; 4] = [0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820];
@@ -139,34 +139,8 @@ fn main() {
 
     let engine_thread = std::thread::Builder::new()
         .name("engine".into())
-        .spawn(move || {
-            let mut sys = System::new(boot, rom, false);
-            loop {
-                if token.cancelled() {
-                    break;
-                }
-                for (b, down) in input_rx.try_iter() {
-                    sys.set_button(b, down);
-                }
-                sys.run_frame();
-                frame_in.write(*sys.get_framebuffer());
-
-                sys.drain_audio(audio_tx.slots(), |sample| {
-                    audio_tx
-                        .push(sample)
-                        .expect("Draining Engine audio into rtrb::RingBuffer should never run past the buffer's size");
-                });
-
-                let fill = CAPACITY - audio_tx.slots();
-                let waterline = audio_waterline(
-                    *callback_frames.get().unwrap_or(&FALLBACK_CALLBACK_FRAMES),
-                    stream_config.sample_rate(),);
-                if fill > waterline {
-                    let excess = (fill - waterline) as f64 / SAMPLE_RATE as f64;
-                    std::thread::sleep(Duration::from_secs_f64(excess));
-                }
-            }
-        }).expect("failed to spawn engine thread");
+        .spawn(move || {})
+        .expect("failed to spawn engine thread");
 
     stream.play().expect("Failed to start output stream");
 

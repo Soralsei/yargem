@@ -5,9 +5,9 @@ use std::{
     rc::Rc,
 };
 
-use super::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu};
+use super::mmu::MemoryHandler;
 use crate::clock::{signal, Cpu, Listener, Raiser};
-use crate::memory::mmu::Next;
+use crate::memory::mmu::MemoryContext;
 use crate::{
     clock::{Cycles, Timeline},
     cpu::interrupt::InterruptRequest,
@@ -139,11 +139,11 @@ impl SerialState {
 }
 
 impl<S: ByteSink> MemoryHandler for Serial<S> {
-    fn read(&self, address: u16, _next: Next<'_>) -> u8 {
+    fn read(&self, address: u16, _next: MemoryContext<'_>) -> u8 {
         self.state.borrow().read(address)
     }
 
-    fn write(&self, address: u16, value: u8, _next: Next<'_>) {
+    fn write(&self, address: u16, value: u8, _next: MemoryContext<'_>) {
         self.state.borrow_mut().write(address, value);
         self.raiser.raise();
     }

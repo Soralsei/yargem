@@ -9,8 +9,8 @@ use crate::cpu::interrupt::InterruptRequest;
 use crate::graphics::attributes::{BgAttributes, CGBBank, ObjectAttribute, TilePriority};
 use crate::graphics::fifo::{BgFIFO, ObjFIFO, Pixel};
 use crate::graphics::registers::{ObjSize, PpuMode, PpuRegisters, TileAddressing, TileArea};
-use crate::memory::bus::{Bus, BusController, BusOwner};
-use crate::memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu};
+use crate::memory::bus::{Bus, BusOwner, BusType};
+use crate::memory::mmu::{MemoryContext, MemoryHandler};
 use crate::util::future::Race;
 use crate::{is_bit_set, SCREEN_H, SCREEN_W};
 
@@ -111,7 +111,7 @@ pub struct Ppu {
     /// The PPU denies the CPU the buses it is using. Arbitration lives here
     /// rather than in the memory handler so that OAM DMA and the PPU's own
     /// fetches, which go through `peek`/`poke`, stay exempt.
-    bus_controller: Rc<BusController>,
+    bus_controller: Rc<Bus>,
 
     is_cgb: bool,
 
@@ -122,11 +122,7 @@ pub struct Ppu {
 }
 
 impl Ppu {
-    pub fn new(
-        interrupt_request: InterruptRequest,
-        bus_controller: Rc<BusController>,
-        is_cgb: bool,
-    ) -> Self {
+    pub fn new(interrupt_request: InterruptRequest, bus: Rc<Bus>, is_cgb: bool) -> Self {
         let (raiser, listener) = signal();
         Self {
             registers: RefCell::default(),
@@ -138,7 +134,7 @@ impl Ppu {
             frame_ready: Cell::new(false),
             window_y_reached: Cell::new(false),
             window_ly: Cell::new(0),
-            bus_controller,
+            bus_controller: bus,
             is_cgb,
             raiser,
             listener: Cell::new(Some(listener)),
@@ -252,11 +248,11 @@ impl Ppu {
                 }
             }
         };
-        self.lock(Bus::Oam, oam);
-        self.lock(Bus::Video, video);
+        self.lock(BusType::Oam, oam);
+        self.lock(BusType::Video, video);
     }
 
-    fn lock(&self, bus: Bus, held: bool) {
+    fn lock(&self, bus: BusType, held: bool) {
         match held {
             true => self.bus_controller.seize(bus, BusOwner::Ppu, 0xFF),
             false => self.bus_controller.release(bus, BusOwner::Ppu),
@@ -276,7 +272,7 @@ impl Ppu {
 
     fn scanline_mut(&self, ly: u8) -> RefMut<'_, [u8]> {
         let start = ly as usize * SCREEN_W;
-        // returns a new RefMut from the passed RefMut mpped with the closure
+        // returns a new RefMut from the passed RefMut mapped with the closure
         // Here it returns a RefMut of a scanline from the back frame buffer
         RefMut::map(self.back.borrow_mut(), |back| {
             &mut back[start..start + SCREEN_W]
@@ -620,20 +616,20 @@ impl Ppu {
 }
 
 impl MemoryHandler for Ppu {
-    fn read(&self, _mmu: &Mmu, address: u16) -> MemoryRead {
+    fn read(&self, address: u16, _: MemoryContext<'_>) -> u8 {
         let registers = self.registers.borrow();
         match address {
             0x8000..=0x9FFF => {
                 let bank = (registers.vram_bank() & 1) as usize;
                 let offset = (address - 0x8000) as usize;
-                MemoryRead::Replace(self.vram[bank][offset].get())
+                self.vram[bank][offset].get()
             }
-            0xFE00..=0xFE9F => MemoryRead::Replace(self.oam[(address & 0xFF) as usize].get()),
-            _ => MemoryRead::Replace(registers.read(address)),
+            0xFE00..=0xFE9F => self.oam[(address & 0xFF) as usize].get(),
+            _ => registers.read(address),
         }
     }
 
-    fn write(&self, _mmu: &Mmu, address: u16, value: u8) -> MemoryWrite {
+    fn write(&self, address: u16, value: u8, _: MemoryContext<'_>) {
         match address {
             0x8000..=0x9FFF => {
                 let bank = (self.registers.borrow().vram_bank() & 1) as usize;
@@ -650,7 +646,6 @@ impl MemoryHandler for Ppu {
                 }
             }
         };
-        MemoryWrite::Block
     }
 }
 
@@ -659,8 +654,7 @@ mod tests {
     use super::*;
     use crate::clock::Time;
     use crate::cpu::interrupt::InterruptController;
-    use crate::memory::bus::BusController;
-    use crate::memory::mmu::AddressMap;
+    use crate::memory::mmu::{AddressMap, Mmu, Source};
 
     /// Drives the PPU alone, with no CPU: VRAM is poked directly, and registers
     /// go through the PPU's own write handler, since an LCDC write is what
@@ -676,11 +670,7 @@ mod tests {
         fn new() -> Self {
             let mut time = Time::new();
             let interrupts = Rc::new(InterruptController::new());
-            let ppu = Rc::new(Ppu::new(
-                interrupts.request(),
-                Rc::new(BusController::new()),
-                false,
-            ));
+            let ppu = Rc::new(Ppu::new(interrupts.request(), Rc::new(Bus::new()), false));
             time.spawn(|timeline: Timeline<Fixed>| Ppu::task(ppu.clone(), timeline));
             Self {
                 time,
@@ -691,8 +681,16 @@ mod tests {
             }
         }
 
+        fn memory_ctx(&self) -> MemoryContext<'_> {
+            MemoryContext {
+                mmu: &self.mmu,
+                next: &[],
+                source: Source::Dma,
+            }
+        }
+
         fn reg(&self, address: u16, value: u8) {
-            let _ = self.ppu.write(&self.mmu, address, value);
+            let _ = self.ppu.write(address, value, self.memory_ctx());
         }
 
         fn vram(&self, address: u16, value: u8) {

@@ -10,9 +10,9 @@ use crate::{
         channel::{Channel, Noise, Square, Wave},
         registers::AudioRegisters,
     },
-    clock::{Cycles, EdgeListener, Fixed, FixedClock, Timeline},
+    clock::{Cycles, EdgeListener, FixedClock},
     is_bit_set,
-    memory::mmu::{MemoryHandler, MemoryRead, MemoryWrite, Mmu},
+    memory::mmu::{MemoryContext, MemoryHandler},
     util::containers::CircularBuffer,
 };
 
@@ -131,18 +131,6 @@ impl Apu {
             div_apu.next().raw_fut().await;
             this.catch_up(this.fixed.now() - 1);
             this.state.borrow_mut().frame_step();
-        }
-    }
-
-    pub async fn generator_task(this: Rc<Apu>, timeline: Timeline<Fixed>) -> Infallible {
-        let mut step_counter = 0;
-        loop {
-            timeline.wait(2).await;
-            this.state.borrow_mut().generator_step();
-            if step_counter == 31 {
-                this.state.borrow_mut().buffer_sample();
-            }
-            step_counter = (step_counter + 1) & 0x1F;
         }
     }
 
@@ -355,21 +343,21 @@ impl ApuState {
 }
 
 impl MemoryHandler for Apu {
-    fn read(&self, _: &Mmu, address: u16) -> MemoryRead {
+    fn read(&self, address: u16, _: MemoryContext<'_>) -> u8 {
         self.catch_up(self.fixed.now());
         match address {
-            0xFF26 => MemoryRead::Replace(self.state.borrow().read_nr52()),
+            0xFF26 => self.state.borrow().read_nr52(),
             0xFF10..=0xFF23 => {
                 let (channel, reg) = Apu::split(address);
-                MemoryRead::Replace(self.state.borrow().read(channel, reg))
+                self.state.borrow().read(channel, reg)
             }
-            0xFF27..=0xFF2F => MemoryRead::Replace(0xFF),
-            0xFF30..=0xFF3F => MemoryRead::Replace(self.state.borrow().ch3.read_wave(address)),
-            _ => MemoryRead::Replace(self.state.borrow().registers.read(address)),
+            0xFF27..=0xFF2F => 0xFF,
+            0xFF30..=0xFF3F => self.state.borrow().ch3.read_wave(address),
+            _ => self.state.borrow().registers.read(address),
         }
     }
 
-    fn write(&self, _: &Mmu, address: u16, value: u8) -> MemoryWrite {
+    fn write(&self, address: u16, value: u8, _: MemoryContext<'_>) {
         self.catch_up(self.fixed.now());
         let mut state = self.state.borrow_mut();
         match (state.is_powered, address) {
@@ -390,6 +378,5 @@ impl MemoryHandler for Apu {
             }
             _ => {}
         }
-        MemoryWrite::Block
     }
 }

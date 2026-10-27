@@ -1,7 +1,7 @@
 mod audio;
 mod clock;
 mod cpu;
-mod debug;
+pub mod debug;
 mod graphics;
 pub mod input;
 mod memory;
@@ -10,4 +10,4 @@ mod timer;
 mod util;
 
 pub use audio::SAMPLE_RATE;
-pub use graphics::{SCREEN_H, SCREEN_W};
+pub use graphics::{ppu::Frame, SCREEN_H, SCREEN_W};
