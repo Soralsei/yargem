@@ -16,6 +16,8 @@ pub struct BankRange {
 }
 
 pub enum DebugCommand {
+    Attach,
+    Detach,
     Pause,
     Resume,
     StepInstruction,

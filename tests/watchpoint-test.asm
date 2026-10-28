@@ -28,8 +28,18 @@ ReadPop:
 	ld b, $B0
 	ld sp, 0xC005
 	push bc
-	pop de ; read watchpoint hits here : at address 0xC004 (0x0A) and 0xC003 (0xB0)
+	pop de ; read watchpoint hits here : at address 0xC003 (0x0A)
 	ret
+
+
+SECTION "UnitTests_WritePush", ROM0[$210]
+	ld c, $0A
+	ld b, $B0
+	ld sp, 0xC005
+	push bc ; write watchpoint hits here: address 0xC004 (0xB0)
+	pop de
+	ret
+
 
 SECTION "Main", ROM0
 EntryPoint:

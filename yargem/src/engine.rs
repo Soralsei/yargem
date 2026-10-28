@@ -85,29 +85,17 @@ struct Engine {
 
 impl Engine {
     fn run(mut self) {
-        loop {
-            loop {
-                match self.commands.try_recv() {
-                    Ok(cmd) => self.handle(cmd),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => return,
-                }
-            }
-            if self.sys.paused() {
-                // Blocks at zero CPU; the handle's drop disconnects and wakes it.
-                match self.commands.recv() {
-                    Ok(cmd) => self.handle(cmd),
-                    Err(_) => return,
-                }
-                continue;
-            }
+        while self.drain() {
             match self.sys.run_frame() {
                 RunResult::Frame => self.frames.write(*self.sys.get_framebuffer()),
                 // Nothing can happen without outside action: wait for it.
-                RunResult::Idle => match self.commands.recv() {
-                    Ok(cmd) => self.handle(cmd),
-                    Err(_) => return,
-                },
+                RunResult::Idle | RunResult::Paused => {
+                    match self.commands.recv() {
+                        Ok(cmd) => self.handle(cmd),
+                        Err(_) => return,
+                    }
+                    continue;
+                }
                 RunResult::Stopped(reason) => {
                     // partial frame, drawn up to the current LY
                     self.frames.write(*self.sys.get_framebuffer());
@@ -117,6 +105,18 @@ impl Engine {
             }
             self.pace();
         }
+    }
+
+    /// returns false on broken commands channel
+    fn drain(&mut self) -> bool {
+        loop {
+            match self.commands.try_recv() {
+                Ok(cmd) => self.handle(cmd),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return false,
+            }
+        }
+        true
     }
 
     fn handle(&mut self, cmd: EngineCommand) {

@@ -50,6 +50,7 @@ impl MemoryHandler for Unmapped {
 pub enum RunResult {
     Frame,
     Idle,
+    Paused,
     Stopped(StopReason),
 }
 
@@ -211,6 +212,11 @@ impl System {
     pub fn run_frame(&mut self) -> RunResult {
         const BUDGET: Cycles = 2 * CYCLES_PER_FRAME;
         let mut done = 0;
+
+        if self.paused() {
+            return RunResult::Paused;
+        }
+
         while done < BUDGET {
             if let Some(pc) = self.cpu.take_boundary() {
                 if self.debugger.attached() {
@@ -229,6 +235,9 @@ impl System {
             // nothing can happen on the system without outside action
             // or a frame can be displayed
             if advanced == 0 || self.cpu_parked() {
+                if let Some(reason) = self.debugger.pause_idle() {
+                    return RunResult::Stopped(reason);
+                }
                 return RunResult::Idle;
             }
             if self.ppu.take_frame_ready() {
@@ -266,6 +275,14 @@ impl System {
     }
 
     pub fn debug(&mut self, cmd: DebugCommand) -> Option<DebugEvent> {
-        self.debugger.handle(cmd, self.pc())
+        self.debugger.handle(cmd)
+    }
+
+    pub fn attach_debugger(&mut self) {
+        self.debugger.attach();
+    }
+
+    pub fn detach_debugger(&mut self) {
+        self.debugger.detach();
     }
 }

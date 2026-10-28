@@ -4,13 +4,12 @@ use std::{
 };
 
 use crate::{
-    cpu::cpu::Cpu,
     debug::{
         breakpoint::Breakpoints,
         protocol::{BankAddr, DebugCommand, DebugEvent, StopReason, WatchId, WatchpointHit},
         watchpoint::{AccessKind, WatchSet, Watchpoint},
     },
-    memory::mmu::{MemoryContext, MemoryHandler, Mmu, Source},
+    memory::mmu::{MemoryContext, MemoryHandler, Source},
 };
 
 pub struct WatchTap {
@@ -187,22 +186,25 @@ impl Debugger {
         reason
     }
 
-    pub fn should_break(&self, addr: &BankAddr) -> bool {
-        self.breakpoints.breaks(&addr)
+    pub fn pause_idle(&mut self) -> Option<StopReason> {
+        if matches!(self.mode, RunMode::PauseRequested) {
+            self.mode = RunMode::Paused;
+            return Some(StopReason::UserPause);
+        }
+        None
     }
 
     pub fn paused(&self) -> bool {
         matches!(self.mode, RunMode::Paused)
     }
 
-    pub fn handle(&mut self, cmd: DebugCommand, pc: u16) -> Option<DebugEvent> {
+    pub fn handle(&mut self, cmd: DebugCommand) -> Option<DebugEvent> {
         let event = match cmd {
             DebugCommand::Pause => {
-                self.mode = RunMode::PauseRequested;
-                Some(DebugEvent::Paused {
-                    reason: StopReason::UserPause,
-                    pc,
-                })
+                if !self.paused() {
+                    self.mode = RunMode::PauseRequested;
+                }
+                None
             }
             DebugCommand::Resume => {
                 self.mode = RunMode::Running;
@@ -225,7 +227,10 @@ impl Debugger {
                 self.add_watch(id, watchpoint);
                 None
             }
-            DebugCommand::RemoveBreakpoint(_bank_addr) => todo!(),
+            DebugCommand::RemoveBreakpoint(bank_addr) => {
+                self.breakpoints.remove(bank_addr);
+                None
+            }
             DebugCommand::RemoveWatchpoint(id) => {
                 self.remove_watch(id);
                 None
@@ -233,6 +238,14 @@ impl Debugger {
             DebugCommand::ReadMemory { start: _, len: _ } => todo!(),
             DebugCommand::WriteMemory { addr: _, value: _ } => todo!(),
             DebugCommand::ReadRegisters => todo!(),
+            DebugCommand::Attach => {
+                self.attach();
+                None
+            }
+            DebugCommand::Detach => {
+                self.detach();
+                None
+            }
         };
         event
     }
@@ -286,9 +299,8 @@ mod test {
         }
     }
 
-    fn check_run_result(run: &RunResult, expected: &WatchpointHit) {
+    fn check_hit_watchpoint(run: &RunResult, expected: &WatchpointHit) {
         match run {
-            RunResult::Idle => panic!("watchpoint not hit, returned Idle"),
             RunResult::Stopped(stop_reason) => {
                 let StopReason::Watchpoint(hit) = stop_reason else {
                     assert!(
@@ -303,7 +315,7 @@ mod test {
                 assert_eq!(hit.old, expected.old);
                 assert_eq!(hit.new, expected.new);
             }
-            RunResult::Frame => unreachable!(),
+            other => panic!("unexpected run result : {:?}", other),
         }
     }
 
@@ -329,7 +341,7 @@ mod test {
             old: 123,
             new: 123,
         };
-        check_run_result(&run, &expected);
+        check_hit_watchpoint(&run, &expected);
     }
 
     #[test]
@@ -355,7 +367,7 @@ mod test {
             new: 234,
         };
 
-        check_run_result(&run, &expected);
+        check_hit_watchpoint(&run, &expected);
     }
 
     #[test]
@@ -381,7 +393,33 @@ mod test {
             new: 0x0A,
         };
 
-        check_run_result(&run, &expected);
+        check_hit_watchpoint(&run, &expected);
+    }
+
+    #[test]
+    fn watchpoint_write_push() {
+        let mut h = Harness::new("../tests/watchpoint-test.gb").expect("failed to read ROM");
+        let evt = h.debug(DebugCommand::AddWatchpoint {
+            id: WatchId(0u32),
+            bank_range: BankRange {
+                bank: None,
+                range: 0xC004..=0xC004,
+            },
+            access: AccessKind::Write,
+        });
+
+        assert!(evt.is_none(), "debug event is not none");
+
+        let run = h.run_until_end();
+        let expected = WatchpointHit {
+            id: WatchId(0),
+            addr: 0xC004,
+            bank: None,
+            old: 0x00,
+            new: 0xB0,
+        };
+
+        check_hit_watchpoint(&run, &expected);
     }
 
     #[test]
@@ -397,17 +435,15 @@ mod test {
         assert!(evt.is_none(), "debug event is not none");
 
         let mut break_count = 0;
-        for _ in 0..10 {
-            if let RunResult::Stopped(reason) = h.run_until_end() {
-                match reason {
-                    StopReason::Breakpoint(bank_addr) => {
-                        assert_eq!(bank_addr, addr);
-                        break_count += 1;
-                    }
-                    _ => continue,
+        for _ in 0..20 {
+            match h.run_until_end() {
+                RunResult::Stopped(StopReason::Breakpoint(bank_addr)) => {
+                    assert_eq!(bank_addr, addr);
+                    break_count += 1;
+                    h.debug(DebugCommand::Resume);
                 }
-            } else {
-                continue;
+                RunResult::Idle => break,
+                other => panic!("unexpected run result : {:?}", other),
             }
         }
 
