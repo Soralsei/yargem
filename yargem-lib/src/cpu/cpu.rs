@@ -9,6 +9,7 @@ use crate::cpu::instructions::{execute_prefixed, execute_unprefixed};
 use crate::cpu::interrupt::InterruptController;
 use crate::cpu::registers::{Flags, Reg16, Reg8};
 use crate::memory::bus::CpuBus;
+use crate::system::PowerOn;
 use crate::util::bit_operations::*;
 use common::Condition;
 
@@ -22,7 +23,7 @@ pub enum Ime {
 
 pub struct Cpu {
     pub registers: RefCell<Registers>,
-    instr: Cell<u64>,
+    boundary: Cell<Option<u16>>,
     halted: Cell<bool>,
     halt_bug: Cell<bool>,
     ime: Cell<Ime>,
@@ -32,11 +33,15 @@ pub struct Cpu {
 }
 
 impl Cpu {
-    pub fn new(is_cgb: bool) -> Cpu {
+    pub fn new(is_cgb: bool, power_on: PowerOn) -> Cpu {
+        let registers = match power_on {
+            PowerOn::BootRom => Registers::default(),
+            PowerOn::PostBoot => Registers::new(is_cgb),
+        };
         Cpu {
-            registers: RefCell::new(Registers::new(is_cgb)),
+            registers: RefCell::new(registers),
             ime: Cell::new(Ime::Disabled),
-            instr: Cell::new(0),
+            boundary: Cell::new(None),
             halted: Cell::new(false),
             halt_bug: Cell::new(false),
             wedged: Cell::new(false),
@@ -67,8 +72,8 @@ impl Cpu {
         }
     }
 
-    pub fn instr_count(&self) -> u64 {
-        self.instr.get()
+    pub fn take_boundary(&self) -> Option<u16> {
+        self.boundary.take()
     }
 
     pub fn halt(&self) {
@@ -131,7 +136,8 @@ impl CpuTask {
     }
 
     async fn execute(&mut self) {
-        self.cpu.instr.set(self.cpu.instr.get() + 1);
+        // Set current pc boundary before fetch
+        self.cpu.boundary.set(Some(self.registers().pc));
 
         self.fetch(Reg8::Z).await;
         let opcode = self.registers().z;

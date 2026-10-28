@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 
 use crate::{cpu::registers::Registers, debug::watchpoint::AccessKind};
 
-#[derive(Ord, Eq, PartialEq, PartialOrd)]
+#[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy)]
 pub struct BankAddr {
     pub bank: Option<u16>,
     pub address: u16,
@@ -56,6 +56,7 @@ pub struct WatchpointHit {
     pub new: u8,
 }
 
+#[derive(Debug)]
 pub enum StopReason {
     Breakpoint(BankAddr),
     Watchpoint(WatchpointHit),

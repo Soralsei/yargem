@@ -1,8 +1,5 @@
 use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc, Arc,
-    },
+    sync::mpsc,
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -11,10 +8,10 @@ use yargem_lib::{
     debug::protocol::{DebugCommand, DebugEvent},
     input::Button,
     system::{RunResult, Settings, System},
-    Frame, SAMPLE_RATE, SCREEN_H, SCREEN_W,
+    Frame, SCREEN_H, SCREEN_W,
 };
 
-use crate::audio::manager::{AudioSink, Sample};
+use crate::audio::manager::AudioSink;
 
 const FALLBACK_PACING: f64 = 70224.0 / 4194304.0;
 

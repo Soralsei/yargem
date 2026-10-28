@@ -11,6 +11,7 @@ use crate::graphics::fifo::{BgFIFO, ObjFIFO, Pixel};
 use crate::graphics::registers::{ObjSize, PpuMode, PpuRegisters, TileAddressing, TileArea};
 use crate::memory::bus::{Bus, BusOwner, BusType};
 use crate::memory::mmu::{MemoryContext, MemoryHandler};
+use crate::system::PowerOn;
 use crate::util::future::Race;
 use crate::{is_bit_set, SCREEN_H, SCREEN_W};
 
@@ -122,10 +123,15 @@ pub struct Ppu {
 }
 
 impl Ppu {
-    pub fn new(interrupt_request: InterruptRequest, bus: Rc<Bus>, is_cgb: bool) -> Self {
+    pub fn new(
+        interrupt_request: InterruptRequest,
+        bus: Rc<Bus>,
+        is_cgb: bool,
+        power_on: PowerOn,
+    ) -> Self {
         let (raiser, listener) = signal();
         Self {
-            registers: RefCell::default(),
+            registers: RefCell::new(PpuRegisters::new(power_on)),
             interrupt_request,
             vram: core::array::from_fn(|_| [const { Cell::new(0) }; 0x2000]),
             oam: [const { Cell::new(0) }; 160],
@@ -670,7 +676,12 @@ mod tests {
         fn new() -> Self {
             let mut time = Time::new();
             let interrupts = Rc::new(InterruptController::new());
-            let ppu = Rc::new(Ppu::new(interrupts.request(), Rc::new(Bus::new()), false));
+            let ppu = Rc::new(Ppu::new(
+                interrupts.request(),
+                Rc::new(Bus::new()),
+                false,
+                PowerOn::BootRom,
+            ));
             time.spawn(|timeline: Timeline<Fixed>| Ppu::task(ppu.clone(), timeline));
             Self {
                 time,

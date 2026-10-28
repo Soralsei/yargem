@@ -1,4 +1,5 @@
 use crate::is_bit_set;
+use crate::system::PowerOn;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -197,8 +198,16 @@ pub struct PpuRegisters {
 }
 
 impl PpuRegisters {
-    pub fn new() -> Self {
-        Default::default()
+    pub fn new(power_on: PowerOn) -> Self {
+        match power_on {
+            PowerOn::BootRom => Self::default(),
+            // What the boot ROM leaves behind (Pan Docs "Power Up Sequence").
+            PowerOn::PostBoot => Self {
+                lcdc: 0x91.into(),
+                bgp: 0xFC,
+                ..Self::default()
+            },
+        }
     }
 
     pub fn read(&self, address: u16) -> u8 {

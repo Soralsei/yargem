@@ -14,6 +14,6 @@ fn main() {
     }
     let mut sys = System::new(boot_rom, rom, Settings::default());
     loop {
-        sys.step();
+        let _ = sys.run_frame();
     }
 }

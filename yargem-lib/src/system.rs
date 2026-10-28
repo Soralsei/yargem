@@ -46,6 +46,7 @@ impl MemoryHandler for Unmapped {
     }
 }
 
+#[derive(Debug)]
 pub enum RunResult {
     Frame,
     Idle,
@@ -56,6 +57,13 @@ pub struct Settings {
     pub is_cgb_override: bool,
     pub debugger_attached: bool,
     pub debugger_run_mode: RunMode,
+}
+
+/// Where execution starts: the boot ROM, or the state it leaves behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerOn {
+    BootRom,
+    PostBoot,
 }
 
 impl Default for Settings {
@@ -69,7 +77,7 @@ impl Default for Settings {
 }
 
 pub struct System {
-    cpu: Rc<Cpu>,
+    pub cpu: Rc<Cpu>,
     mmu: Rc<Mmu>,
     irq: Rc<InterruptController>,
     ppu: Rc<Ppu>,
@@ -83,6 +91,11 @@ impl System {
     pub fn new(boot_rom: Option<Vec<u8>>, rom: Vec<u8>, settings: Settings) -> Self {
         let mut time = Time::new();
         let debugger = Debugger::new(settings.debugger_attached, settings.debugger_run_mode);
+
+        let power_on = match boot_rom {
+            Some(_) => PowerOn::BootRom,
+            None => PowerOn::PostBoot,
+        };
 
         let mbc = Rc::new(Mbc::new(boot_rom, rom));
         let is_cgb = mbc.cartridge().is_cgb_only() || settings.is_cgb_override;
@@ -101,11 +114,12 @@ impl System {
 
         // The bus is shared: the CPU drives it, and clocked devices that move
         // bytes themselves (OAM DMA, the PPU fetcher) need a handle to it too.
-        let cpu = Rc::new(Cpu::new(is_cgb));
+        let cpu = Rc::new(Cpu::new(is_cgb, power_on));
         let ppu = Rc::new(Ppu::new(
             interrupt_controller.request(),
             bus.clone(),
             is_cgb,
+            power_on,
         ));
         let apu = Rc::new(Apu::new(time.fixed.clone(), is_cgb));
 
@@ -194,40 +208,27 @@ impl System {
         }
     }
 
-    pub fn step(&mut self) {
-        let mark = self.cpu.instr_count();
-        while self.cpu.instr_count() == mark && !self.cpu_parked() {
-            self.time.advance(CYCLES_PER_FRAME);
-        }
-    }
-
     pub fn run_frame(&mut self) -> RunResult {
         const BUDGET: Cycles = 2 * CYCLES_PER_FRAME;
         let mut done = 0;
-        let mut mark = self.cpu.instr_count();
         while done < BUDGET {
-            if self.debugger.attached() {
-                let pc = self.pc();
-                let bank = self.mmu.bank_at(pc);
-                let addr = BankAddr { bank, address: pc };
+            if let Some(pc) = self.cpu.take_boundary() {
+                if self.debugger.attached() {
+                    let bank = self.mmu.bank_at(pc);
+                    let addr = BankAddr { bank, address: pc };
 
-                if self.debugger.should_break(&addr) {
-                    return RunResult::Stopped(StopReason::Breakpoint(addr));
+                    if let Some(reason) = self.debugger.should_stop(&addr) {
+                        return RunResult::Stopped(reason);
+                    }
                 }
             }
 
             let advanced = self.time.advance(CYCLES_PER_FRAME);
 
-            if self.debugger.attached() && self.cpu.instr_count() != mark {
-                mark = self.cpu.instr_count();
-                if let Some(reason) = self.debugger.should_stop(&self.cpu, &self.mmu) {
-                    return RunResult::Stopped(reason);
-                }
-            }
             // Both clocks are stalled, no point in running frames
             // nothing can happen on the system without outside action
             // or a frame can be displayed
-            if advanced == 0 {
+            if advanced == 0 || self.cpu_parked() {
                 return RunResult::Idle;
             }
             if self.ppu.take_frame_ready() {

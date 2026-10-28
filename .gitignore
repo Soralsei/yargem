@@ -3,3 +3,6 @@ gb-test-roms/
 
 .vscode
 backlog*.txt
+
+tests/*.o
+tests/*.gb
