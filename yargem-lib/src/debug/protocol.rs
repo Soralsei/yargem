@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::ops::RangeInclusive;
+use std::ops::{Deref, RangeInclusive};
 
 use crate::{cpu::registers::Registers, debug::watchpoint::AccessKind};
 
@@ -40,10 +40,20 @@ pub enum DebugCommand {
     ReadRegisters,
 }
 
+pub struct RegisterSnapshot(pub Registers);
+
+impl Deref for RegisterSnapshot {
+    type Target = Registers;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 pub enum DebugEvent {
     Paused { reason: StopReason, pc: u16 },
     Memory { start: u16, bytes: Vec<u8> },
-    Registers(Registers),
+    Registers(RegisterSnapshot),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -1,11 +1,13 @@
 use std::cell::Cell;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     cpu::interrupt::InterruptRequest,
     memory::mmu::{MemoryContext, MemoryHandler},
 };
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum Button {
     A,
     B,

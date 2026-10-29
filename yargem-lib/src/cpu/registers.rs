@@ -5,7 +5,7 @@ const SUB_BIT: u8 = 6;
 const HALF_CARRY_BIT: u8 = 5;
 const CARRY_BIT: u8 = 4;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Flags {
     pub zero: bool,
     pub subtract: bool,
@@ -49,7 +49,7 @@ impl std::convert::From<u8> for Flags {
 // `crate::cpu::registers::{Reg8, Reg16}` imports keep working.
 pub use common::{Reg16, Reg8};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Registers {
     pub a: u8,
     pub b: u8,

@@ -4,7 +4,7 @@ use std::rc::Rc;
 use crate::audio::apu::Apu;
 use crate::clock::{CpuClock, Cycles, Time};
 use crate::debug::debugger::{Debugger, RunMode};
-use crate::debug::protocol::{BankAddr, DebugCommand, DebugEvent, StopReason};
+use crate::debug::protocol::{BankAddr, DebugCommand, DebugEvent, RegisterSnapshot, StopReason};
 use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
@@ -275,7 +275,25 @@ impl System {
     }
 
     pub fn debug(&mut self, cmd: DebugCommand) -> Option<DebugEvent> {
-        self.debugger.handle(cmd)
+        match cmd {
+            DebugCommand::ReadMemory { start, len } => None,
+            DebugCommand::WriteMemory { addr, value } => None,
+            DebugCommand::Attach => {
+                self.debugger.attach();
+                None
+            }
+            DebugCommand::Detach => {
+                self.debugger.detach();
+                None
+            }
+            DebugCommand::ReadRegisters => Some(DebugEvent::Registers(RegisterSnapshot(
+                *self.cpu.registers.borrow(),
+            ))),
+            _ => {
+                self.debugger.handle(cmd);
+                None
+            }
+        }
     }
 
     pub fn attach_debugger(&mut self) {

@@ -47,7 +47,12 @@ impl Drop for EngineHandle {
     }
 }
 
-pub fn spawn_engine(boot: Option<Vec<u8>>, rom: Vec<u8>, settings: Settings) -> EngineHandle {
+pub fn spawn_engine(
+    boot: Option<Vec<u8>>,
+    rom: Vec<u8>,
+    settings: Settings,
+    request_repaint: Box<dyn Fn() + Send>,
+) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (ev_tx, ev_rx) = mpsc::channel();
     let (frame_in, frame_out) = triple_buffer::triple_buffer(&[0u8; SCREEN_W * SCREEN_H]);
@@ -62,6 +67,7 @@ pub fn spawn_engine(boot: Option<Vec<u8>>, rom: Vec<u8>, settings: Settings) -> 
                 events: ev_tx,
                 frames: frame_in,
                 audio: None, // arrives as AudioSink once a device is up
+                request_repaint,
             }
             .run()
         })
@@ -81,6 +87,7 @@ struct Engine {
     events: mpsc::Sender<DebugEvent>,
     frames: triple_buffer::Input<Frame>,
     audio: Option<AudioSink>,
+    request_repaint: Box<dyn Fn() + Send>,
 }
 
 impl Engine {
@@ -103,6 +110,7 @@ impl Engine {
                     let _ = self.events.send(DebugEvent::Paused { reason, pc });
                 }
             }
+            (self.request_repaint)();
             self.pace();
         }
     }

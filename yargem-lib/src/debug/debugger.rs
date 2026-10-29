@@ -6,7 +6,7 @@ use std::{
 use crate::{
     debug::{
         breakpoint::Breakpoints,
-        protocol::{BankAddr, DebugCommand, DebugEvent, StopReason, WatchId, WatchpointHit},
+        protocol::{BankAddr, DebugCommand, StopReason, WatchId, WatchpointHit},
         watchpoint::{AccessKind, WatchSet, Watchpoint},
     },
     memory::mmu::{MemoryContext, MemoryHandler, Source},
@@ -198,25 +198,21 @@ impl Debugger {
         matches!(self.mode, RunMode::Paused)
     }
 
-    pub fn handle(&mut self, cmd: DebugCommand) -> Option<DebugEvent> {
-        let event = match cmd {
+    pub fn handle(&mut self, cmd: DebugCommand) {
+        match cmd {
             DebugCommand::Pause => {
                 if !self.paused() {
                     self.mode = RunMode::PauseRequested;
                 }
-                None
             }
             DebugCommand::Resume => {
                 self.mode = RunMode::Running;
-                None
             }
             DebugCommand::StepInstruction => {
                 self.mode = RunMode::Step { remaining: 1 };
-                None
             }
             DebugCommand::AddBreakpoint(_bank_addr) => {
                 self.breakpoints.add(_bank_addr);
-                None
             }
             DebugCommand::AddWatchpoint {
                 id,
@@ -225,29 +221,15 @@ impl Debugger {
             } => {
                 let watchpoint = Watchpoint::new(bank_range.bank, bank_range.range, access);
                 self.add_watch(id, watchpoint);
-                None
             }
             DebugCommand::RemoveBreakpoint(bank_addr) => {
                 self.breakpoints.remove(bank_addr);
-                None
             }
             DebugCommand::RemoveWatchpoint(id) => {
                 self.remove_watch(id);
-                None
             }
-            DebugCommand::ReadMemory { start: _, len: _ } => todo!(),
-            DebugCommand::WriteMemory { addr: _, value: _ } => todo!(),
-            DebugCommand::ReadRegisters => todo!(),
-            DebugCommand::Attach => {
-                self.attach();
-                None
-            }
-            DebugCommand::Detach => {
-                self.detach();
-                None
-            }
+            _ => {}
         };
-        event
     }
 }
 
