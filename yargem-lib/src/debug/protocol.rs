@@ -2,6 +2,7 @@
 
 use std::ops::{Deref, RangeInclusive};
 
+pub use crate::debug::watchpoint::Watchpoint;
 use crate::{cpu::registers::Registers, debug::watchpoint::AccessKind};
 
 #[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy)]
@@ -23,7 +24,6 @@ pub enum DebugCommand {
     StepInstruction,
     AddBreakpoint(BankAddr),
     AddWatchpoint {
-        id: WatchId,
         bank_range: BankRange,
         access: AccessKind,
     },
@@ -51,9 +51,14 @@ impl Deref for RegisterSnapshot {
 }
 
 pub enum DebugEvent {
+    Attached,
+    Detached,
     Paused { reason: StopReason, pc: u16 },
+    Resumed,
     Memory { start: u16, bytes: Vec<u8> },
     Registers(RegisterSnapshot),
+    Watchpoints(Vec<(WatchId, Watchpoint)>),
+    Breakpoints(Vec<BankAddr>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

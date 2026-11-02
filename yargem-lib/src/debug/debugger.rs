@@ -4,12 +4,16 @@ use std::{
 };
 
 use crate::{
+    cpu::cpu::Cpu,
     debug::{
         breakpoint::Breakpoints,
-        protocol::{BankAddr, DebugCommand, StopReason, WatchId, WatchpointHit},
+        protocol::{
+            BankAddr, DebugCommand, DebugEvent, RegisterSnapshot, StopReason, WatchId,
+            WatchpointHit,
+        },
         watchpoint::{AccessKind, WatchSet, Watchpoint},
     },
-    memory::mmu::{MemoryContext, MemoryHandler, Source},
+    memory::mmu::{MemoryContext, MemoryHandler, Mmu, Source},
 };
 
 pub struct WatchTap {
@@ -47,6 +51,10 @@ impl WatchTap {
 
     fn take_hit(&self) -> Option<WatchpointHit> {
         self.hit.take()
+    }
+
+    fn get(&self) -> Vec<(WatchId, Watchpoint)> {
+        self.set.borrow().iter().map(Clone::clone).collect()
     }
 }
 
@@ -116,6 +124,7 @@ pub struct Debugger {
     breakpoints: Breakpoints,
     mode: RunMode,
     attached: bool,
+    watch_counter: u32,
 }
 
 impl Debugger {
@@ -125,6 +134,7 @@ impl Debugger {
             breakpoints: Breakpoints::new(),
             mode: initial_mode,
             attached: start_attached,
+            watch_counter: 0,
         }
     }
 
@@ -144,8 +154,9 @@ impl Debugger {
         self.sync_watches();
     }
 
-    fn add_watch(&mut self, id: WatchId, watchpoint: Watchpoint) {
-        self.watch_tap.add(id, watchpoint);
+    fn add_watch(&mut self, watchpoint: Watchpoint) {
+        self.watch_counter += 1;
+        self.watch_tap.add(WatchId(self.watch_counter), watchpoint);
         self.sync_watches();
     }
 
@@ -187,9 +198,16 @@ impl Debugger {
     }
 
     pub fn pause_idle(&mut self) -> Option<StopReason> {
-        if matches!(self.mode, RunMode::PauseRequested) {
-            self.mode = RunMode::Paused;
-            return Some(StopReason::UserPause);
+        match self.mode {
+            RunMode::PauseRequested => {
+                self.mode = RunMode::Paused;
+                return Some(StopReason::UserPause);
+            }
+            RunMode::Step { remaining } if remaining == 1 => {
+                self.mode = RunMode::Paused;
+                return Some(StopReason::Step);
+            }
+            _ => {}
         }
         None
     }
@@ -198,8 +216,29 @@ impl Debugger {
         matches!(self.mode, RunMode::Paused)
     }
 
-    pub fn handle(&mut self, cmd: DebugCommand) {
+    pub fn handle(&mut self, cmd: DebugCommand, cpu: &Cpu, mmu: &Mmu) -> Option<DebugEvent> {
         match cmd {
+            DebugCommand::ReadMemory { start, len } => {
+                let bytes: Vec<u8> = (start..(start + len))
+                    .map(|addr| mmu.read(addr, Source::Debugger))
+                    .collect();
+                return Some(DebugEvent::Memory { start, bytes });
+            }
+            DebugCommand::WriteMemory { addr, value } => mmu.write(addr, value, Source::Debugger),
+
+            DebugCommand::ReadRegisters => {
+                return Some(DebugEvent::Registers(RegisterSnapshot(
+                    *cpu.registers.borrow(),
+                )))
+            }
+            DebugCommand::Attach => {
+                self.attach();
+                return Some(DebugEvent::Attached);
+            }
+            DebugCommand::Detach => {
+                self.detach();
+                return Some(DebugEvent::Detached);
+            }
             DebugCommand::Pause => {
                 if !self.paused() {
                     self.mode = RunMode::PauseRequested;
@@ -213,23 +252,24 @@ impl Debugger {
             }
             DebugCommand::AddBreakpoint(_bank_addr) => {
                 self.breakpoints.add(_bank_addr);
+                return Some(DebugEvent::Breakpoints(self.breakpoints.get()));
             }
-            DebugCommand::AddWatchpoint {
-                id,
-                bank_range,
-                access,
-            } => {
+
+            DebugCommand::AddWatchpoint { bank_range, access } => {
                 let watchpoint = Watchpoint::new(bank_range.bank, bank_range.range, access);
-                self.add_watch(id, watchpoint);
+                self.add_watch(watchpoint);
+                return Some(DebugEvent::Watchpoints(self.watch_tap.get()));
             }
             DebugCommand::RemoveBreakpoint(bank_addr) => {
                 self.breakpoints.remove(bank_addr);
+                return Some(DebugEvent::Breakpoints(self.breakpoints.get()));
             }
             DebugCommand::RemoveWatchpoint(id) => {
                 self.remove_watch(id);
+                return Some(DebugEvent::Watchpoints(self.watch_tap.get()));
             }
-            _ => {}
         };
+        None
     }
 }
 
@@ -305,7 +345,6 @@ mod test {
     fn watchpoint_read_normal() {
         let mut h = Harness::new("../tests/watchpoint-test.gb").expect("failed to open rom");
         let evt = h.debug(DebugCommand::AddWatchpoint {
-            id: WatchId(0u32),
             bank_range: BankRange {
                 bank: None,
                 range: 0xC001..=0xC001,
@@ -330,7 +369,6 @@ mod test {
     fn watchpoint_write_normal() {
         let mut h = Harness::new("../tests/watchpoint-test.gb").expect("failed to open rom");
         let evt = h.debug(DebugCommand::AddWatchpoint {
-            id: WatchId(0u32),
             bank_range: BankRange {
                 bank: None,
                 range: 0xC002..=0xC002,
@@ -356,7 +394,6 @@ mod test {
     fn watchpoint_read_pop() {
         let mut h = Harness::new("../tests/watchpoint-test.gb").expect("failed to read ROM");
         let evt = h.debug(DebugCommand::AddWatchpoint {
-            id: WatchId(0u32),
             bank_range: BankRange {
                 bank: None,
                 range: 0xC003..=0xC003,
@@ -382,7 +419,6 @@ mod test {
     fn watchpoint_write_push() {
         let mut h = Harness::new("../tests/watchpoint-test.gb").expect("failed to read ROM");
         let evt = h.debug(DebugCommand::AddWatchpoint {
-            id: WatchId(0u32),
             bank_range: BankRange {
                 bank: None,
                 range: 0xC004..=0xC004,

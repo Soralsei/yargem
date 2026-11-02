@@ -4,7 +4,9 @@ use std::fs;
 use egui::Key;
 use egui_file_dialog::FileDialog;
 use yargem_lib::{
-    debug::protocol::{DebugCommand, DebugEvent, RegisterSnapshot, StopReason},
+    debug::protocol::{
+        BankAddr, DebugCommand, DebugEvent, RegisterSnapshot, StopReason, WatchId, Watchpoint,
+    },
     input::Button,
     system::Settings,
 };
@@ -33,6 +35,8 @@ pub struct DebugState {
     pub last_stop: Option<StopReason>,
     pub last_pc: Option<u16>,
     pub last_regs: Option<RegisterSnapshot>,
+    pub watchpoints: Vec<(WatchId, Watchpoint)>,
+    pub breakpoints: Vec<BankAddr>,
 }
 
 pub struct App {
@@ -80,7 +84,6 @@ impl App {
                         .as_ref()
                         .expect("engine is not none")
                         .send(EngineCommand::Debug(DebugCommand::Attach));
-                    self.debug_state = Some(DebugState::default());
                 }
                 if ui
                     .add_enabled(
@@ -93,7 +96,6 @@ impl App {
                         .as_ref()
                         .expect("engine is not none")
                         .send(EngineCommand::Debug(DebugCommand::Detach));
-                    self.debug_state = None;
                 }
                 ui.separator();
                 if ui
@@ -119,10 +121,6 @@ impl App {
                         .as_ref()
                         .expect("engine is not none")
                         .send(EngineCommand::Debug(DebugCommand::Resume));
-                    self.debug_state
-                        .as_mut()
-                        .expect("debug state is not None")
-                        .paused = false;
                 }
             })
         });
@@ -175,10 +173,31 @@ impl eframe::App for App {
                         state.last_stop = Some(reason);
                     }
                 }
+                DebugEvent::Resumed => {
+                    if let Some(state) = &mut self.debug_state {
+                        state.paused = false;
+                        state.last_pc = None;
+                        state.last_stop = None;
+                    }
+                }
                 DebugEvent::Memory { start, bytes } => {}
                 DebugEvent::Registers(register_snapshot) => {
                     if let Some(state) = &mut self.debug_state {
                         state.last_regs = Some(register_snapshot);
+                    }
+                }
+                DebugEvent::Attached => {
+                    self.debug_state = Some(DebugState::default());
+                }
+                DebugEvent::Detached => self.debug_state = None,
+                DebugEvent::Watchpoints(watches) => {
+                    if let Some(state) = &mut self.debug_state {
+                        state.watchpoints = watches;
+                    }
+                }
+                DebugEvent::Breakpoints(breakpoints) => {
+                    if let Some(state) = &mut self.debug_state {
+                        state.breakpoints = breakpoints;
                     }
                 }
             }

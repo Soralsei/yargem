@@ -78,7 +78,7 @@ impl Default for Settings {
 }
 
 pub struct System {
-    pub cpu: Rc<Cpu>,
+    pub(crate) cpu: Rc<Cpu>,
     mmu: Rc<Mmu>,
     irq: Rc<InterruptController>,
     ppu: Rc<Ppu>,
@@ -275,25 +275,7 @@ impl System {
     }
 
     pub fn debug(&mut self, cmd: DebugCommand) -> Option<DebugEvent> {
-        match cmd {
-            DebugCommand::ReadMemory { start, len } => None,
-            DebugCommand::WriteMemory { addr, value } => None,
-            DebugCommand::Attach => {
-                self.debugger.attach();
-                None
-            }
-            DebugCommand::Detach => {
-                self.debugger.detach();
-                None
-            }
-            DebugCommand::ReadRegisters => Some(DebugEvent::Registers(RegisterSnapshot(
-                *self.cpu.registers.borrow(),
-            ))),
-            _ => {
-                self.debugger.handle(cmd);
-                None
-            }
-        }
+        self.debugger.handle(cmd, &self.cpu, &self.mmu)
     }
 
     pub fn attach_debugger(&mut self) {

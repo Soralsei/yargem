@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::ops::RangeInclusive;
+use std::{ops::RangeInclusive, slice::Iter};
 
 use bitvec::array::BitArray;
 
@@ -12,6 +12,7 @@ pub enum AccessKind {
     Write,
 }
 
+#[derive(Clone)]
 pub struct Watchpoint {
     bank: Option<u16>,
     range: RangeInclusive<u16>,
@@ -40,6 +41,10 @@ impl Watchpoint {
 
     pub fn access(&self) -> AccessKind {
         self.kind
+    }
+
+    pub fn bank(&self) -> Option<u16> {
+        self.bank
     }
 }
 
@@ -101,5 +106,9 @@ impl WatchSet {
 
     pub fn has_watches(&self) -> bool {
         !self.watches.is_empty()
+    }
+
+    pub fn iter(&self) -> Iter<'_, (WatchId, Watchpoint)> {
+        self.watches.iter()
     }
 }

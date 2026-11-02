@@ -24,4 +24,8 @@ impl Breakpoints {
     pub fn breaks(&self, addr: &BankAddr) -> bool {
         self.breaks.contains(addr)
     }
+
+    pub fn get(&self) -> Vec<BankAddr> {
+        self.breaks.iter().map(Clone::clone).collect()
+    }
 }
