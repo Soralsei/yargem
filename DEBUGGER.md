@@ -82,7 +82,6 @@ pub enum DebugCommand {
     AddWatchpoint { range: (u16, u16), on_read: bool, on_write: bool },
     ReadMemory { start: u16, len: u16 },
     WriteMemory { addr: u16, value: u8 },
-    ReadRegisters,
 }
 
 pub enum DebugEvent {

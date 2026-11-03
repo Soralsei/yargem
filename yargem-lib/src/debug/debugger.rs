@@ -227,15 +227,11 @@ impl Debugger {
                 return Some(DebugEvent::Memory { start, bytes });
             }
             DebugCommand::WriteMemory { addr, value } => mmu.write(addr, value, Source::Debugger),
-
-            DebugCommand::ReadRegisters => {
-                return Some(DebugEvent::Registers(RegisterSnapshot(
-                    *cpu.registers.borrow(),
-                )))
-            }
             DebugCommand::Attach => {
                 self.attach();
-                return Some(DebugEvent::Attached);
+                return Some(DebugEvent::Attached(RegisterSnapshot(
+                    *cpu.registers.borrow(),
+                )));
             }
             DebugCommand::Detach => {
                 self.detach();

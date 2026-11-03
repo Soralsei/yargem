@@ -106,8 +106,8 @@ impl Engine {
                 RunResult::Stopped(reason) => {
                     // partial frame, drawn up to the current LY
                     self.frames.write(*self.sys.get_framebuffer());
-                    let pc = self.sys.pc();
-                    let _ = self.events.send(DebugEvent::Paused { reason, pc });
+                    let regs = self.sys.registers();
+                    let _ = self.events.send(DebugEvent::Paused { reason, regs });
                 }
             }
             (self.request_repaint)();

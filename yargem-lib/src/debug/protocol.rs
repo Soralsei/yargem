@@ -2,6 +2,7 @@
 
 use std::ops::{Deref, RangeInclusive};
 
+pub use crate::cpu::registers::Flags;
 use crate::cpu::registers::Registers;
 pub use crate::debug::watchpoint::{AccessKind, Watchpoint};
 
@@ -37,7 +38,6 @@ pub enum DebugCommand {
         addr: u16,
         value: u8,
     },
-    ReadRegisters,
 }
 
 pub struct RegisterSnapshot(pub Registers);
@@ -51,11 +51,17 @@ impl Deref for RegisterSnapshot {
 }
 
 pub enum DebugEvent {
-    Attached,
+    Attached(RegisterSnapshot),
     Detached,
-    Paused { reason: StopReason, pc: u16 },
+    Paused {
+        reason: StopReason,
+        regs: RegisterSnapshot,
+    },
     Resumed,
-    Memory { start: u16, bytes: Vec<u8> },
+    Memory {
+        start: u16,
+        bytes: Vec<u8>,
+    },
     Registers(RegisterSnapshot),
     Watchpoints(Vec<(WatchId, Watchpoint)>),
     Breakpoints(Vec<BankAddr>),

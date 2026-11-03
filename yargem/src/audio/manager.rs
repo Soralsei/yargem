@@ -9,7 +9,7 @@ use std::{
 use anyhow::Context;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, Host, Stream, StreamConfig,
+    Device, Host, Stream,
 };
 use yargem_lib::SAMPLE_RATE;
 

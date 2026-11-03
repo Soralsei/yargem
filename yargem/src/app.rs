@@ -36,7 +36,6 @@ const KEYMAP: [(Key, Button); 8] = [
 pub struct DebugState {
     pub paused: bool,
     pub last_stop: Option<StopReason>,
-    pub last_pc: Option<u16>,
     pub last_regs: Option<RegisterSnapshot>,
     pub watchpoints: Vec<(WatchId, Watchpoint)>,
     pub breakpoints: Vec<BankAddr>,
@@ -176,17 +175,17 @@ impl eframe::App for App {
         let Some(engine) = &self.engine else { return };
         while let Ok(ev) = engine.events.try_recv() {
             match ev {
-                DebugEvent::Paused { reason, pc } => {
+                DebugEvent::Paused { reason, regs } => {
                     if let Some(state) = &mut self.debug_state {
                         state.paused = true;
-                        state.last_pc = Some(pc);
+                        state.last_regs = Some(regs);
                         state.last_stop = Some(reason);
                     }
                 }
                 DebugEvent::Resumed => {
                     if let Some(state) = &mut self.debug_state {
                         state.paused = false;
-                        state.last_pc = None;
+                        state.last_regs = None;
                         state.last_stop = None;
                     }
                 }
@@ -196,8 +195,9 @@ impl eframe::App for App {
                         state.last_regs = Some(register_snapshot);
                     }
                 }
-                DebugEvent::Attached => {
+                DebugEvent::Attached(regs) => {
                     self.debug_state = Some(DebugState::default());
+                    self.debug_state.as_mut().unwrap().last_regs = Some(regs);
                     self.debug_panel.open = true;
                 }
                 DebugEvent::Detached => {

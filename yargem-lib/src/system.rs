@@ -266,8 +266,8 @@ impl System {
             || (self.cpu.halted() && self.irq.enabled() & 0x1F == 0)
     }
 
-    pub fn pc(&self) -> u16 {
-        self.cpu.pc()
+    pub fn registers(&self) -> RegisterSnapshot {
+        RegisterSnapshot(*self.cpu.registers.borrow())
     }
 
     pub fn paused(&self) -> bool {
