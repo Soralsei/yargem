@@ -11,7 +11,7 @@ use crate::cpu::registers::{Flags, Reg16, Reg8};
 use crate::memory::bus::CpuBus;
 use crate::system::PowerOn;
 use crate::util::bit_operations::*;
-use common::Condition;
+use yargem_common::Condition;
 
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum Ime {

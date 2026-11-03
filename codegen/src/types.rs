@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 // Shared ISA types come from `common`; re-exported so `use crate::types::*`
 // still reaches them. Parsing yaml into them lives here, not in `common`.
-pub use common::{Condition, Cycles, Operand, Reg16, Reg8};
+pub use yargem_common::{Condition, Cycles, Operand, Reg16, Reg8};
 
 #[derive(Debug, Deserialize)]
 pub struct ConditionalTime {

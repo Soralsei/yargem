@@ -47,7 +47,7 @@ impl std::convert::From<u8> for Flags {
 
 // Single source of truth — see the `common` crate. Re-exported so existing
 // `crate::cpu::registers::{Reg8, Reg16}` imports keep working.
-pub use common::{Reg16, Reg8};
+pub use yargem_common::{Reg16, Reg8};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Registers {

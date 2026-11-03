@@ -14,7 +14,10 @@ use yargem_lib::{
 use crate::{
     audio::manager::AudioManager,
     engine::{spawn_engine, EngineCommand, EngineHandle},
-    ui::{debug::controls_bar, Screen},
+    ui::{
+        debug::{controls_bar, DebugPanel},
+        Screen,
+    },
 };
 
 // TODO extract input handling to `input` module
@@ -41,14 +44,13 @@ pub struct DebugState {
 
 pub struct App {
     audio: AudioManager,
+
     file_dialog: FileDialog,
     screen: Screen,
+    debug_panel: DebugPanel,
 
     engine: Option<EngineHandle>,
     debug_state: Option<DebugState>,
-
-    show_debugger: bool,
-    show_memory: bool,
 }
 
 impl App {
@@ -57,17 +59,16 @@ impl App {
             audio: AudioManager::new(),
             screen: Screen::new(&ctx.egui_ctx),
             file_dialog: FileDialog::default(),
+            debug_panel: DebugPanel::new(),
             engine: None,
             debug_state: None,
-            show_debugger: false,
-            show_memory: false,
         }
     }
 
     fn top_panel_menu(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                self.file_menu(ui);
+                self.file_menu(ui, frame);
                 self.debug_menu(ui);
             });
         });
@@ -76,28 +77,11 @@ impl App {
     fn debug_menu(&mut self, ui: &mut egui::Ui) {
         ui.add_enabled_ui(self.engine.is_some(), |ui| {
             ui.menu_button("Debug", |ui| {
-                if ui
-                    .add_enabled(self.debug_state.is_none(), egui::Button::new("Attach"))
-                    .clicked()
-                {
-                    self.engine
-                        .as_ref()
-                        .expect("engine is not none")
-                        .send(EngineCommand::Debug(DebugCommand::Attach));
-                }
-                if ui
-                    .add_enabled(
-                        self.debug_state.as_ref().is_some(),
-                        egui::Button::new("Detach"),
-                    )
-                    .clicked()
-                {
-                    self.engine
-                        .as_ref()
-                        .expect("engine is not none")
-                        .send(EngineCommand::Debug(DebugCommand::Detach));
-                }
+                self.attach_menu(ui);
+                self.detach_menu(ui);
+
                 ui.separator();
+
                 if ui
                     .add_enabled(
                         self.debug_state.as_ref().is_some_and(|state| !state.paused),
@@ -126,7 +110,34 @@ impl App {
         });
     }
 
-    fn file_menu(&mut self, ui: &mut egui::Ui) {
+    fn detach_menu(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add_enabled(
+                self.debug_state.as_ref().is_some(),
+                egui::Button::new("Detach"),
+            )
+            .clicked()
+        {
+            self.engine
+                .as_ref()
+                .expect("engine is not none")
+                .send(EngineCommand::Debug(DebugCommand::Detach));
+        }
+    }
+
+    fn attach_menu(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add_enabled(self.debug_state.is_none(), egui::Button::new("Attach"))
+            .clicked()
+        {
+            self.engine
+                .as_ref()
+                .expect("engine is not none")
+                .send(EngineCommand::Debug(DebugCommand::Attach));
+        }
+    }
+
+    fn file_menu(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui.menu_button("File", |ui| {
             if ui.button("Open ROM").clicked() {
                 self.file_dialog.pick_file();
@@ -147,17 +158,17 @@ impl App {
         });
     }
 
-    fn debugger_panel(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        egui::Panel::right("debugger").show(ui, |ui| {});
-    }
-
-    fn memory_window(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Memory")
-            .open(&mut self.show_memory)
-            .show(ctx, |ui| {
-                // TODO
-            });
-    }
+    // fn debugger_panel(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    //     egui::Panel::right("debugger").show(ui, |ui| {});
+    // }
+    //
+    // fn memory_window(&mut self, ctx: &egui::Context) {
+    //     egui::Window::new("Memory")
+    //         .open(&mut self.show_memory)
+    //         .show(ctx, |ui| {
+    //             // TODO
+    //         });
+    // }
 }
 
 impl eframe::App for App {
@@ -167,7 +178,6 @@ impl eframe::App for App {
             match ev {
                 DebugEvent::Paused { reason, pc } => {
                     if let Some(state) = &mut self.debug_state {
-                        println!("paused");
                         state.paused = true;
                         state.last_pc = Some(pc);
                         state.last_stop = Some(reason);
@@ -188,8 +198,12 @@ impl eframe::App for App {
                 }
                 DebugEvent::Attached => {
                     self.debug_state = Some(DebugState::default());
+                    self.debug_panel.open = true;
                 }
-                DebugEvent::Detached => self.debug_state = None,
+                DebugEvent::Detached => {
+                    self.debug_state = None;
+                    self.debug_panel.open = false;
+                }
                 DebugEvent::Watchpoints(watches) => {
                     if let Some(state) = &mut self.debug_state {
                         state.watchpoints = watches;
@@ -206,16 +220,18 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.top_panel_menu(ui, frame);
-        if self.show_debugger {
-            self.debugger_panel(ui, frame);
-        }
-        if self.show_memory {
-            self.memory_window(ui);
-        }
+
+        // if self.show_debugger {
+        //     self.debugger_panel(ui, frame);
+        // }
+        // if self.show_memory {
+        //     self.memory_window(ui);
+        // }
         if let Some(debug_state) = &mut self.debug_state {
             egui::Panel::top("controls").show(ui, |ui| {
                 controls_bar(ui, self.engine.as_ref(), debug_state);
             });
+            self.debug_panel.show(ui, self.engine.as_ref(), debug_state);
         }
 
         self.file_dialog.update(ui);

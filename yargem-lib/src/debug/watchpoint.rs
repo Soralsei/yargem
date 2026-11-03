@@ -6,8 +6,9 @@ use bitvec::array::BitArray;
 
 use crate::debug::protocol::WatchId;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum AccessKind {
+    #[default]
     Read,
     Write,
 }

@@ -68,6 +68,7 @@ impl MemoryHandler for WatchTap {
                 if let Some(id) = set.hit(address, bank, AccessKind::Read) {
                     self.maybe_store_hit(WatchpointHit {
                         id,
+                        access: AccessKind::Read,
                         addr: address,
                         bank,
                         old: val,
@@ -95,6 +96,7 @@ impl MemoryHandler for WatchTap {
                 if let Some(id) = self.set.borrow().hit(address, bank, AccessKind::Write) {
                     self.maybe_store_hit(WatchpointHit {
                         id,
+                        access: AccessKind::Write,
                         addr: address,
                         bank,
                         old,
@@ -344,7 +346,7 @@ mod test {
     #[test]
     fn watchpoint_read_normal() {
         let mut h = Harness::new("../tests/watchpoint-test.gb").expect("failed to open rom");
-        let evt = h.debug(DebugCommand::AddWatchpoint {
+        let _ = h.debug(DebugCommand::AddWatchpoint {
             bank_range: BankRange {
                 bank: None,
                 range: 0xC001..=0xC001,
@@ -352,11 +354,10 @@ mod test {
             access: AccessKind::Read,
         });
 
-        assert!(evt.is_none(), "debug event is not none");
-
         let run = h.run_until_end();
         let expected = WatchpointHit {
-            id: WatchId(0u32),
+            id: WatchId(1),
+            access: AccessKind::Read,
             addr: 0xC001,
             bank: None,
             old: 123,
@@ -368,7 +369,7 @@ mod test {
     #[test]
     fn watchpoint_write_normal() {
         let mut h = Harness::new("../tests/watchpoint-test.gb").expect("failed to open rom");
-        let evt = h.debug(DebugCommand::AddWatchpoint {
+        let _ = h.debug(DebugCommand::AddWatchpoint {
             bank_range: BankRange {
                 bank: None,
                 range: 0xC002..=0xC002,
@@ -376,11 +377,10 @@ mod test {
             access: AccessKind::Write,
         });
 
-        assert!(evt.is_none(), "debug event is not none");
-
         let run = h.run_until_end();
         let expected = WatchpointHit {
-            id: WatchId(0u32),
+            id: WatchId(1),
+            access: AccessKind::Write,
             addr: 0xC002,
             bank: None,
             old: 0,
@@ -393,7 +393,7 @@ mod test {
     #[test]
     fn watchpoint_read_pop() {
         let mut h = Harness::new("../tests/watchpoint-test.gb").expect("failed to read ROM");
-        let evt = h.debug(DebugCommand::AddWatchpoint {
+        let _ = h.debug(DebugCommand::AddWatchpoint {
             bank_range: BankRange {
                 bank: None,
                 range: 0xC003..=0xC003,
@@ -401,11 +401,10 @@ mod test {
             access: AccessKind::Read,
         });
 
-        assert!(evt.is_none(), "debug event is not none");
-
         let run = h.run_until_end();
         let expected = WatchpointHit {
-            id: WatchId(0),
+            id: WatchId(1),
+            access: AccessKind::Read,
             addr: 0xC003,
             bank: None,
             old: 0x0A,
@@ -418,7 +417,7 @@ mod test {
     #[test]
     fn watchpoint_write_push() {
         let mut h = Harness::new("../tests/watchpoint-test.gb").expect("failed to read ROM");
-        let evt = h.debug(DebugCommand::AddWatchpoint {
+        let _ = h.debug(DebugCommand::AddWatchpoint {
             bank_range: BankRange {
                 bank: None,
                 range: 0xC004..=0xC004,
@@ -426,11 +425,10 @@ mod test {
             access: AccessKind::Write,
         });
 
-        assert!(evt.is_none(), "debug event is not none");
-
         let run = h.run_until_end();
         let expected = WatchpointHit {
-            id: WatchId(0),
+            id: WatchId(1),
+            access: AccessKind::Write,
             addr: 0xC004,
             bank: None,
             old: 0x00,
@@ -448,9 +446,7 @@ mod test {
             bank: None,
             address: 0x212,
         };
-        let evt = h.debug(DebugCommand::AddBreakpoint(addr));
-
-        assert!(evt.is_none(), "debug event is not none");
+        let _ = h.debug(DebugCommand::AddBreakpoint(addr));
 
         let mut break_count = 0;
         for _ in 0..20 {

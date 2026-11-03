@@ -1,6 +1,8 @@
 //! Shared instruction-set types. Single source of truth so codegen and backend
 //! cannot drift. Types only — no serde, no parsing, no dependencies.
 
+use std::fmt::Display;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reg8 {
     A,
@@ -24,6 +26,27 @@ pub enum Reg16 {
     SP,
     PC,
     WZ,
+}
+
+impl From<Reg16> for &str {
+    fn from(value: Reg16) -> Self {
+        match value {
+            Reg16::AF => "AF",
+            Reg16::BC => "BC",
+            Reg16::DE => "DE",
+            Reg16::HL => "HL",
+            Reg16::SP => "SP",
+            Reg16::PC => "PC",
+            Reg16::WZ => "WZ",
+        }
+    }
+}
+
+impl Display for Reg16 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label: &str = (*self).into();
+        write!(f, "{}", label)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

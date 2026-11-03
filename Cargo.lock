@@ -761,11 +761,11 @@ name = "codegen"
 version = "0.1.0"
 dependencies = [
  "clap",
- "common",
  "phf 0.14.0",
  "serde",
  "serde_yaml_ng",
  "tera",
+ "yargem-common",
 ]
 
 [[package]]
@@ -803,10 +803,6 @@ dependencies = [
  "bytes",
  "memchr",
 ]
-
-[[package]]
-name = "common"
-version = "0.1.0"
 
 [[package]]
 name = "concurrent-queue"
@@ -1104,6 +1100,15 @@ dependencies = [
  "egui",
  "serde",
  "sysinfo",
+]
+
+[[package]]
+name = "egui-phosphor"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f4299551488dddaa8f757727e1eb4ffdaf277ffe6e30b413403468f5ecf4634"
+dependencies = [
+ "egui",
 ]
 
 [[package]]
@@ -4890,21 +4895,27 @@ dependencies = [
  "eframe",
  "egui",
  "egui-file-dialog",
+ "egui-phosphor",
  "minifb",
  "rtrb",
  "serde",
  "triple_buffer",
+ "yargem-common",
  "yargem-lib",
 ]
+
+[[package]]
+name = "yargem-common"
+version = "0.1.0"
 
 [[package]]
 name = "yargem-lib"
 version = "0.1.0"
 dependencies = [
  "bitvec",
- "common",
  "serde",
  "slab",
+ "yargem-common",
 ]
 
 [[package]]

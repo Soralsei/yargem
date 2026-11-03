@@ -2,8 +2,8 @@
 
 use std::ops::{Deref, RangeInclusive};
 
-pub use crate::debug::watchpoint::Watchpoint;
-use crate::{cpu::registers::Registers, debug::watchpoint::AccessKind};
+use crate::cpu::registers::Registers;
+pub use crate::debug::watchpoint::{AccessKind, Watchpoint};
 
 #[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy)]
 pub struct BankAddr {
@@ -67,6 +67,7 @@ pub struct WatchId(pub u32);
 #[derive(Clone, Copy, Debug)]
 pub struct WatchpointHit {
     pub id: WatchId,
+    pub access: AccessKind,
     pub addr: u16,
     pub bank: Option<u16>,
     pub old: u8,
