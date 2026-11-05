@@ -16,7 +16,7 @@ use crate::{
     engine::{spawn_engine, EngineCommand, EngineHandle},
     ui::{
         debug::{controls_bar, DebugPanel},
-        Screen,
+        style, Screen,
     },
 };
 
@@ -41,6 +41,21 @@ pub struct DebugState {
     pub breakpoints: Vec<BankAddr>,
 }
 
+impl DebugState {
+    pub fn new(
+        regs: RegisterSnapshot,
+        breaks: Vec<BankAddr>,
+        watches: Vec<(WatchId, Watchpoint)>,
+    ) -> Self {
+        Self {
+            last_regs: Some(regs),
+            watchpoints: watches,
+            breakpoints: breaks,
+            ..Default::default()
+        }
+    }
+}
+
 pub struct App {
     audio: AudioManager,
 
@@ -54,6 +69,12 @@ pub struct App {
 
 impl App {
     pub fn new(ctx: &eframe::CreationContext) -> Self {
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+
+        ctx.egui_ctx.set_fonts(fonts);
+        style::install(&ctx.egui_ctx);
+
         Self {
             audio: AudioManager::new(),
             screen: Screen::new(&ctx.egui_ctx),
@@ -146,7 +167,8 @@ impl App {
                 .add_enabled(self.engine.is_some(), egui::Button::new("Close ROM"))
                 .clicked()
             {
-                self.engine.take();
+                self.engine = None;
+                self.debug_state = None;
             }
 
             ui.separator();
@@ -156,18 +178,6 @@ impl App {
             }
         });
     }
-
-    // fn debugger_panel(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-    //     egui::Panel::right("debugger").show(ui, |ui| {});
-    // }
-    //
-    // fn memory_window(&mut self, ctx: &egui::Context) {
-    //     egui::Window::new("Memory")
-    //         .open(&mut self.show_memory)
-    //         .show(ctx, |ui| {
-    //             // TODO
-    //         });
-    // }
 }
 
 impl eframe::App for App {
@@ -195,13 +205,15 @@ impl eframe::App for App {
                         state.last_regs = Some(register_snapshot);
                     }
                 }
-                DebugEvent::Attached(regs) => {
-                    self.debug_state = Some(DebugState::default());
-                    self.debug_state.as_mut().unwrap().last_regs = Some(regs);
+                DebugEvent::Attached {
+                    regs,
+                    breaks,
+                    watches,
+                } => {
+                    self.debug_state = Some(DebugState::new(regs, breaks, watches));
                     self.debug_panel.open = true;
                 }
                 DebugEvent::Detached => {
-                    self.debug_state = None;
                     self.debug_panel.open = false;
                 }
                 DebugEvent::Watchpoints(watches) => {
@@ -221,12 +233,6 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.top_panel_menu(ui, frame);
 
-        // if self.show_debugger {
-        //     self.debugger_panel(ui, frame);
-        // }
-        // if self.show_memory {
-        //     self.memory_window(ui);
-        // }
         if let Some(debug_state) = &mut self.debug_state {
             egui::Panel::top("controls").show(ui, |ui| {
                 controls_bar(ui, self.engine.as_ref(), debug_state);

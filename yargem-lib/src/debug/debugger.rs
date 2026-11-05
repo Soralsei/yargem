@@ -229,9 +229,11 @@ impl Debugger {
             DebugCommand::WriteMemory { addr, value } => mmu.write(addr, value, Source::Debugger),
             DebugCommand::Attach => {
                 self.attach();
-                return Some(DebugEvent::Attached(RegisterSnapshot(
-                    *cpu.registers.borrow(),
-                )));
+                return Some(DebugEvent::Attached {
+                    regs: RegisterSnapshot(*cpu.registers.borrow()),
+                    breaks: self.breakpoints.get(),
+                    watches: self.watch_tap.get(),
+                });
             }
             DebugCommand::Detach => {
                 self.detach();
@@ -244,6 +246,7 @@ impl Debugger {
             }
             DebugCommand::Resume => {
                 self.mode = RunMode::Running;
+                return Some(DebugEvent::Resumed);
             }
             DebugCommand::StepInstruction => {
                 self.mode = RunMode::Step { remaining: 1 };

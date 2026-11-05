@@ -101,6 +101,7 @@ impl Engine {
                         Ok(cmd) => self.handle(cmd),
                         Err(_) => return,
                     }
+                    (self.request_repaint)();
                     continue;
                 }
                 RunResult::Stopped(reason) => {

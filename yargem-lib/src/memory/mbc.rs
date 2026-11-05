@@ -296,7 +296,8 @@ impl BankedMemHandler for Mbc1 {
 
     fn bank_at(&self, address: u16) -> Option<u16> {
         match address {
-            0x0000..=0x3FFF | 0xA000..=0xBFFF => Some(self.ram_bank()),
+            0x0000..=0x3FFF => Some(self.ram_bank() << 5),
+            0xA000..=0xBFFF => Some(self.ram_bank()),
             0x4000..=0x7FFF => Some(self.rom_bank()),
             _ => unreachable!(
                 "unhandled bank resolution in MBC1 at address 0x{:04X}",

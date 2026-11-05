@@ -12,6 +12,16 @@ pub struct BankAddr {
     pub address: u16,
 }
 
+impl BankAddr {
+    pub fn matches(&self, other: &Self) -> bool {
+        self.address == other.address
+            && match (self.bank, other.bank) {
+                (Some(self_bank), Some(other_bank)) => self_bank == other_bank,
+                _ => true,
+            }
+    }
+}
+
 pub struct BankRange {
     pub bank: Option<u16>,
     pub range: RangeInclusive<u16>,
@@ -51,7 +61,11 @@ impl Deref for RegisterSnapshot {
 }
 
 pub enum DebugEvent {
-    Attached(RegisterSnapshot),
+    Attached {
+        regs: RegisterSnapshot,
+        breaks: Vec<BankAddr>,
+        watches: Vec<(WatchId, Watchpoint)>,
+    },
     Detached,
     Paused {
         reason: StopReason,

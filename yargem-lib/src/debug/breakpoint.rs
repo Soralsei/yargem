@@ -22,7 +22,7 @@ impl Breakpoints {
     }
 
     pub fn breaks(&self, addr: &BankAddr) -> bool {
-        self.breaks.contains(addr)
+        self.breaks.iter().any(|br| br.matches(addr))
     }
 
     pub fn get(&self) -> Vec<BankAddr> {

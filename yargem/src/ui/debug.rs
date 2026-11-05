@@ -9,11 +9,12 @@ use crate::{
             badge::{badge, BadgeType},
             indicator::dot,
         },
+        style,
         theme::Theme,
     },
 };
 
-pub fn controls_bar(ui: &mut egui::Ui, engine: Option<&EngineHandle>, state: &mut DebugState) {
+pub fn controls_bar(ui: &mut egui::Ui, engine: Option<&EngineHandle>, state: &DebugState) {
     let Some(e) = engine else { return };
     ui.horizontal(|ui| {
         if ui
@@ -27,7 +28,6 @@ pub fn controls_bar(ui: &mut egui::Ui, engine: Option<&EngineHandle>, state: &mu
             .clicked()
         {
             e.send(crate::engine::EngineCommand::Debug(DebugCommand::Resume));
-            state.paused = false;
         }
         if ui
             .add_enabled(state.paused, egui::Button::new("Step"))
@@ -43,25 +43,35 @@ pub fn controls_bar(ui: &mut egui::Ui, engine: Option<&EngineHandle>, state: &mu
                 ui.horizontal(|ui| {
                     let label = match reason {
                         StopReason::Breakpoint(bank_addr) => format!(
-                            "Hit breakpoint at bank {}, address 0x{:04X}",
-                            bank_addr.bank.unwrap_or(0),
+                            "Paused - breakpoint {}:${:04X}",
+                            bank_addr
+                                .bank
+                                .map_or("any".to_owned(), |b| "$".to_owned() + &b.to_string()),
                             bank_addr.address
                         ),
                         StopReason::Watchpoint(hit) => format!(
-                            "Watchpoint hit at bank {}, address 0x{:04X}: {} -> {}",
-                            hit.bank.unwrap_or(0),
+                            "Paused - watchpoint #{} {}, address {}:${:04X}: {} -> {}",
+                            hit.id.0,
+                            match hit.access {
+                                AccessKind::Read => "read",
+                                AccessKind::Write => "write",
+                            },
+                            hit.bank
+                                .map_or("any".to_owned(), |b| "$".to_owned() + &b.to_string()),
                             hit.addr,
                             hit.old,
                             hit.new
                         ),
                         StopReason::Step | StopReason::UserPause => {
-                            format!("Paused at pc 0x{:04X}", regs.pc)
+                            format!("Paused - step at ${:04X}", regs.pc)
                         }
                     };
                     ui.label(label);
                     ui.add(dot(Theme::of(ui).stop(reason)));
                 });
             } else {
+                ui.label(egui::RichText::new("Running").color(Theme::of(ui).text_weak));
+                ui.add(dot(Theme::of(ui).running));
             }
         });
     });
@@ -75,7 +85,6 @@ pub struct DebugPanel {
     watch_start: String,
     watch_end: String,
     watch_access: AccessKind,
-    error: String, // ex: bad address: $XYZ
 }
 
 impl DebugPanel {
@@ -88,31 +97,18 @@ impl DebugPanel {
 
     pub fn show(&mut self, ui: &mut egui::Ui, engine: Option<&EngineHandle>, state: &DebugState) {
         egui::Panel::right("dbg_panel")
-            .default_size(320.0)
+            .default_size(400.0)
             .min_size(300.0)
             .show(ui, |ui| {
-                if let Some(err) = &self.bp_err {
-                    let modal = egui::Modal::new(egui::Id::new("break_err")).show(ui, |ui| {
-                        ui.set_max_width(300.0);
-                        ui.heading("Breakpoint error");
-                        ui.label(err.to_string());
-
-                        ui.separator();
-
-                        ui.button("Close").clicked()
-                    });
-                    if modal.inner || modal.should_close() {
-                        self.bp_err = None;
-                    }
-                }
                 egui::Panel::top("dbg_cpu").show(ui, |ui| {
                     cpu_accordion(state, ui);
+                    ui.add_space(style::SECTION_GAP);
                 });
                 egui::Panel::bottom("dbg_lists").show(ui, |ui| {
                     self.break_watch_lists(state, ui, engine);
                 });
                 egui::CentralPanel::default().show(ui, |ui| {
-                    egui::CollapsingHeader::new("Dissassembly")
+                    egui::CollapsingHeader::new("Disassembly")
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.label("Planned");
@@ -127,7 +123,9 @@ impl DebugPanel {
         ui: &mut egui::Ui,
         engine: Option<&EngineHandle>,
     ) {
+        let theme = Theme::of(ui);
         let fill = ui.visuals().code_bg_color;
+        ui.add_space(style::SECTION_GAP);
         let id = ui.make_persistent_id("dbg_breakpoints");
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
             .show_header(ui, |ui| {
@@ -136,29 +134,86 @@ impl DebugPanel {
                     ui,
                     egui::RichText::new(&state.breakpoints.len().to_string()).monospace(),
                     BadgeType::Filled(fill),
-                    egui::vec2(5.0, 2.0),
                 );
             })
-            .body(|ui| {
+            .body_unindented(|ui| {
                 ui.vertical_centered(|ui| {
-                    ui.horizontal(|ui| {
-                        let input_label = ui.label("Break at");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Add").clicked() {
-                                if let Err(e) = self.add_breakpoint(engine) {
-                                    self.bp_err = Some(e);
+                    self.breakpoint_input(engine, theme, ui);
+                    if state.breakpoints.is_empty() {
+                        return;
+                    }
+
+                    let stop_row = match &state.last_stop {
+                        Some(StopReason::Breakpoint(at)) => {
+                            state.breakpoints.iter().position(|b| b.matches(at))
+                        }
+                        _ => None,
+                    };
+                    let (stop_bg, stripe_bg) = (theme.stop_bg, theme.stripe_bg);
+
+                    egui::Grid::new("breakpoint_list")
+                        .num_columns(4)
+                        .with_row_color(move |row, _| match row {
+                            0 => None, // header
+                            r if Some(r - 1) == stop_row => Some(stop_bg),
+                            r if r % 2 == 0 => Some(stripe_bg),
+                            _ => None,
+                        })
+                        .show(ui, |ui| {
+                            ui.label("");
+                            ui.label(egui::RichText::new("bank").weak().small());
+                            ui.label(egui::RichText::new("address").weak().small());
+                            ui.end_row();
+                            for (i, breakpoint) in state.breakpoints.iter().enumerate() {
+                                ui.add(dot(theme.breakpoint));
+                                let bank = match breakpoint.bank {
+                                    Some(bank) => {
+                                        egui::RichText::new(format!("{:02X}", bank)).monospace()
+                                    }
+                                    _ => egui::RichText::new("any").weak().monospace(),
                                 };
-                                self.bp_input.clear();
+                                ui.label(bank);
+                                ui.label(
+                                    egui::RichText::new(format!("${:04X}", breakpoint.address))
+                                        .color(theme.text_strong)
+                                        .monospace(),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        if ui
+                                            .add(
+                                                egui::Button::new(egui_phosphor::regular::X)
+                                                    .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(engine) = engine {
+                                                engine.send(EngineCommand::Debug(
+                                                    DebugCommand::RemoveBreakpoint(*breakpoint),
+                                                ));
+                                            }
+                                        }
+                                        match stop_row {
+                                            Some(row) if i == row => badge(
+                                                ui,
+                                                egui::RichText::new("stopped here")
+                                                    .small()
+                                                    .color(theme.highlight_text),
+                                                BadgeType::Filled(theme.highlight_bg),
+                                            ),
+                                            _ => {}
+                                        }
+                                    },
+                                );
+                                ui.end_row();
                             }
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.bp_input)
-                                    .desired_width(f32::INFINITY),
-                            )
-                            .labelled_by(input_label.id);
                         });
-                    });
                 });
             });
+
+        ui.add_space(style::SECTION_GAP);
 
         let id = ui.make_persistent_id("dbg_watchpoints");
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
@@ -168,50 +223,70 @@ impl DebugPanel {
                     ui,
                     egui::RichText::new(&state.watchpoints.len().to_string()).monospace(),
                     BadgeType::Filled(fill),
-                    egui::vec2(5.0, 2.0),
                 );
             })
             .body(|_ui| { /* add row, list */ });
     }
 
-    fn add_breakpoint(&self, engine: Option<&EngineHandle>) -> anyhow::Result<()> {
-        // TODO parse self.bp_input :
+    fn breakpoint_input(&mut self, engine: Option<&EngineHandle>, theme: Theme, ui: &mut egui::Ui) {
+        let input_left = ui
+            .horizontal(|ui| {
+                ui.add_space(ui.spacing().indent);
+                let input_label = ui.weak("Break at");
+
+                if self.bp_err.is_some() {
+                    ui.visuals_mut().selection.stroke.color = theme.error;
+                }
+                let resp = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.bp_input)
+                            .desired_width(150.0)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("$200 or <bank>:$4000"),
+                    )
+                    .labelled_by(input_label.id);
+                if resp.changed() {
+                    self.bp_err = None;
+                }
+
+                let entered = resp.lost_focus() && ui.input(|i| i.key_down(egui::Key::Enter));
+                let add = ui.button("Add");
+
+                if add.clicked() || entered {
+                    self.add_breakpoint(engine);
+                    resp.request_focus();
+                }
+
+                resp.rect.left()
+            })
+            .inner;
+
+        if let Some(err) = &self.bp_err {
+            ui.horizontal(|ui| {
+                ui.add_space(input_left - ui.cursor().left());
+                ui.label(egui::RichText::new(err.to_string()).color(theme.error))
+            });
+        }
+    }
+
+    fn add_breakpoint(&mut self, engine: Option<&EngineHandle>) {
+        // Do nothing
         if self.bp_input.is_empty() {
-            // Do nothing
-            return Ok(());
+            return;
         }
-        let parts: Vec<_> = self.bp_input.split(":").collect();
-        if !(1..=2).contains(&parts.len()) {
-            return Err(anyhow::Error::msg("too many parts in breakpoint"));
+        match (parse_bank_addr(&self.bp_input), engine) {
+            (Ok(bank_addr), Some(engine)) => {
+                engine.send(EngineCommand::Debug(DebugCommand::AddBreakpoint(bank_addr)));
+                self.bp_input.clear();
+            }
+            (Err(e), _) => self.bp_err = Some(e),
+            _ => {}
         }
-
-        let mut bank: Option<u16> = None;
-        let address: u16;
-
-        let mut parts_iter = parts.iter();
-        let first: u16 = if let Some(part) = parts_iter.next() {
-            u16::from_str_radix(part.trim_start_matches("0x").trim_start_matches("$"), 16)?
-        } else {
-            unreachable!("breakpoint has at least 1 part");
-        };
-        if let Some(part) = parts_iter.next() {
-            bank = Some(first);
-            address =
-                u16::from_str_radix(part.trim_start_matches("0x").trim_start_matches("$"), 16)?;
-        } else {
-            address = first;
-        }
-        if let Some(engine) = engine {
-            engine.send(EngineCommand::Debug(DebugCommand::AddBreakpoint(
-                BankAddr { bank, address },
-            )));
-        }
-        Ok(())
     }
 }
 
 fn cpu_accordion(state: &DebugState, ui: &mut egui::Ui) {
-    egui::CollapsingHeader::new(egui::RichText::new("CPU").strong().size(14.0))
+    egui::CollapsingHeader::new(egui::RichText::new("CPU").strong())
         .default_open(true)
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {
@@ -232,15 +307,13 @@ fn flags(state: &DebugState, ui: &mut egui::Ui) {
                 .color(ui.visuals().weak_text_color())
                 .monospace(),
         );
-        ui.add_space(15.0);
         ui.horizontal(|ui| {
             flag(ui, "Z", flags.zero);
             flag(ui, "N", flags.subtract);
             flag(ui, "H", flags.half_carry);
             flag(ui, "C", flags.carry);
         });
-        ui.add_space(15.0);
-        ui.label(egui::RichText::new(format!("F = {:02X}", u8::from(&flags))));
+        ui.weak(format!("F = {:02X}", u8::from(&flags)));
     });
 }
 
@@ -248,7 +321,6 @@ fn registers(state: &DebugState, ui: &mut egui::Ui) {
     ui.columns(2, |cols| {
         egui::Grid::new("regs_left")
             .num_columns(2)
-            .spacing([10.0, 6.0])
             .show(&mut cols[0], |ui| {
                 register(state, ui, Reg16::AF);
                 ui.end_row();
@@ -259,7 +331,6 @@ fn registers(state: &DebugState, ui: &mut egui::Ui) {
 
         egui::Grid::new("regs_right")
             .num_columns(2)
-            .spacing([10.0, 6.0])
             .show(&mut cols[1], |ui| {
                 register(state, ui, Reg16::BC);
                 ui.end_row();
@@ -290,16 +361,17 @@ fn register(state: &DebugState, ui: &mut egui::Ui, reg: Reg16) {
 
 fn flag(ui: &mut egui::Ui, label: &str, is_set: bool) {
     let theme = Theme::of(ui);
-    let side = ui.text_style_height(&egui::TextStyle::Body) + 10.0;
+    let side = ui.spacing().interact_size.y;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
     let painter = ui.painter();
+    let visuals = ui.visuals().noninteractive();
     if is_set {
-        painter.rect_filled(rect, 2.0, theme.highlight_bg);
+        painter.rect_filled(rect, visuals.corner_radius, theme.highlight_bg);
     } else {
         painter.rect_stroke(
             rect,
-            2.0,
-            egui::Stroke::new(1.0, theme.outline),
+            visuals.corner_radius,
+            egui::Stroke::new(visuals.bg_stroke.width, theme.outline),
             egui::StrokeKind::Inside,
         );
     }
@@ -310,4 +382,27 @@ fn flag(ui: &mut egui::Ui, label: &str, is_set: bool) {
         egui::TextStyle::Monospace.resolve(ui.style()),
         ui.visuals().text_color(),
     );
+}
+
+fn parse_bank_addr(input: &str) -> Result<BankAddr, anyhow::Error> {
+    let input = input.trim();
+    let (bank, addr) = match input.split_once(":") {
+        Some((bank, addr)) => (Some(bank), addr),
+        None => (None, input),
+    };
+    Ok(BankAddr {
+        bank: bank.map(parse_hex).transpose()?,
+        address: parse_hex(addr)?,
+    })
+}
+
+fn parse_hex(part: &str) -> anyhow::Result<u16> {
+    let part = part.trim();
+
+    let digits = part
+        .strip_prefix('$')
+        .or_else(|| part.strip_prefix("0x"))
+        .unwrap_or(part);
+
+    u16::from_str_radix(digits, 16).map_err(|_| anyhow::anyhow!("Not a hex address: {part}"))
 }
