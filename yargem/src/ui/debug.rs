@@ -1,10 +1,16 @@
 use yargem_common::Reg16;
-use yargem_lib::debug::protocol::{AccessKind, DebugCommand, Flags, StopReason};
+use yargem_lib::debug::protocol::{AccessKind, BankAddr, DebugCommand, Flags, StopReason};
 
 use crate::{
     app::DebugState,
-    engine::EngineHandle,
-    ui::{components::indicator::dot, theme::Theme},
+    engine::{EngineCommand, EngineHandle},
+    ui::{
+        components::{
+            badge::{badge, BadgeType},
+            indicator::dot,
+        },
+        theme::Theme,
+    },
 };
 
 pub fn controls_bar(ui: &mut egui::Ui, engine: Option<&EngineHandle>, state: &mut DebugState) {
@@ -31,8 +37,9 @@ pub fn controls_bar(ui: &mut egui::Ui, engine: Option<&EngineHandle>, state: &mu
                 DebugCommand::StepInstruction,
             ));
         }
-        if let (Some(regs), Some(reason)) = (state.last_regs.as_ref(), state.last_stop.as_ref()) {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let (Some(regs), Some(reason)) = (state.last_regs.as_ref(), state.last_stop.as_ref())
+            {
                 ui.horizontal(|ui| {
                     let label = match reason {
                         StopReason::Breakpoint(bank_addr) => format!(
@@ -54,14 +61,16 @@ pub fn controls_bar(ui: &mut egui::Ui, engine: Option<&EngineHandle>, state: &mu
                     ui.label(label);
                     ui.add(dot(Theme::of(ui).stop(reason)));
                 });
-            });
-        }
+            } else {
+            }
+        });
     });
 }
 
 #[derive(Default)]
 pub struct DebugPanel {
     pub open: bool,
+    bp_err: Option<anyhow::Error>,
     bp_input: String,
     watch_start: String,
     watch_end: String,
@@ -77,32 +86,139 @@ impl DebugPanel {
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, _engine: Option<&EngineHandle>, state: &DebugState) {
-        egui::Panel::right("dbg_panel").show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                egui::CollapsingHeader::new(egui::RichText::new("CPU").strong().size(14.0))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            registers(state, ui);
-                            flags(state, ui);
+    pub fn show(&mut self, ui: &mut egui::Ui, engine: Option<&EngineHandle>, state: &DebugState) {
+        egui::Panel::right("dbg_panel")
+            .default_size(320.0)
+            .min_size(300.0)
+            .show(ui, |ui| {
+                if let Some(err) = &self.bp_err {
+                    let modal = egui::Modal::new(egui::Id::new("break_err")).show(ui, |ui| {
+                        ui.set_max_width(300.0);
+                        ui.heading("Breakpoint error");
+                        ui.label(err.to_string());
+
+                        ui.separator();
+
+                        ui.button("Close").clicked()
+                    });
+                    if modal.inner || modal.should_close() {
+                        self.bp_err = None;
+                    }
+                }
+                egui::Panel::top("dbg_cpu").show(ui, |ui| {
+                    cpu_accordion(state, ui);
+                });
+                egui::Panel::bottom("dbg_lists").show(ui, |ui| {
+                    self.break_watch_lists(state, ui, engine);
+                });
+                egui::CentralPanel::default().show(ui, |ui| {
+                    egui::CollapsingHeader::new("Dissassembly")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label("Planned");
+                        });
+                });
+            });
+    }
+
+    fn break_watch_lists(
+        &mut self,
+        state: &DebugState,
+        ui: &mut egui::Ui,
+        engine: Option<&EngineHandle>,
+    ) {
+        let fill = ui.visuals().code_bg_color;
+        let id = ui.make_persistent_id("dbg_breakpoints");
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+            .show_header(ui, |ui| {
+                ui.strong("Breakpoints");
+                badge(
+                    ui,
+                    egui::RichText::new(&state.breakpoints.len().to_string()).monospace(),
+                    BadgeType::Filled(fill),
+                    egui::vec2(5.0, 2.0),
+                );
+            })
+            .body(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.horizontal(|ui| {
+                        let input_label = ui.label("Break at");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Add").clicked() {
+                                if let Err(e) = self.add_breakpoint(engine) {
+                                    self.bp_err = Some(e);
+                                };
+                                self.bp_input.clear();
+                            }
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.bp_input)
+                                    .desired_width(f32::INFINITY),
+                            )
+                            .labelled_by(input_label.id);
                         });
                     });
+                });
+            });
 
-                egui::CollapsingHeader::new("Dissassembly")
-                    .default_open(false)
-                    .show(ui, |_ui| {});
+        let id = ui.make_persistent_id("dbg_watchpoints");
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+            .show_header(ui, |ui| {
+                ui.strong("Watchpoints");
+                badge(
+                    ui,
+                    egui::RichText::new(&state.watchpoints.len().to_string()).monospace(),
+                    BadgeType::Filled(fill),
+                    egui::vec2(5.0, 2.0),
+                );
+            })
+            .body(|_ui| { /* add row, list */ });
+    }
 
-                egui::CollapsingHeader::new("Breakpoints")
-                    .default_open(true)
-                    .show(ui, |_ui| {});
+    fn add_breakpoint(&self, engine: Option<&EngineHandle>) -> anyhow::Result<()> {
+        // TODO parse self.bp_input :
+        if self.bp_input.is_empty() {
+            // Do nothing
+            return Ok(());
+        }
+        let parts: Vec<_> = self.bp_input.split(":").collect();
+        if !(1..=2).contains(&parts.len()) {
+            return Err(anyhow::Error::msg("too many parts in breakpoint"));
+        }
 
-                egui::CollapsingHeader::new("Watchpoints")
-                    .default_open(true)
-                    .show(ui, |_ui| {});
+        let mut bank: Option<u16> = None;
+        let address: u16;
+
+        let mut parts_iter = parts.iter();
+        let first: u16 = if let Some(part) = parts_iter.next() {
+            u16::from_str_radix(part.trim_start_matches("0x").trim_start_matches("$"), 16)?
+        } else {
+            unreachable!("breakpoint has at least 1 part");
+        };
+        if let Some(part) = parts_iter.next() {
+            bank = Some(first);
+            address =
+                u16::from_str_radix(part.trim_start_matches("0x").trim_start_matches("$"), 16)?;
+        } else {
+            address = first;
+        }
+        if let Some(engine) = engine {
+            engine.send(EngineCommand::Debug(DebugCommand::AddBreakpoint(
+                BankAddr { bank, address },
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn cpu_accordion(state: &DebugState, ui: &mut egui::Ui) {
+    egui::CollapsingHeader::new(egui::RichText::new("CPU").strong().size(14.0))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                registers(state, ui);
+                flags(state, ui);
             });
         });
-    }
 }
 
 fn flags(state: &DebugState, ui: &mut egui::Ui) {
