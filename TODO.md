@@ -10,8 +10,8 @@
   - [X] Needs `iter()` on `Breakpoints` and `WatchSet`, `Clone` + `bank()` on `Watchpoint`, and test updates (Add* no longer returns `None`; take the id from the event).
 - [X] **`Resumed` event**: the protocol has no event for leaving the paused state, so the GUI sets `paused = false` itself on Resume as a stopgap. Add `DebugEvent::Resumed`, sent on Resume and when a long step mode (step-frame) starts, so `DebugState` is only written from events. Attach/Detach (also tracked by the GUI itself) can follow the same pattern later.
 - [X] **ReadMemory / WriteMemory**: `System::debug` returns `None` for both. Read through `Source::Debugger` so watchpoints don't fire.
-- [ ] **Step modes**: `StepOver`, `StepScanline`, `StepFrame` are `todo!()` in `Debugger::should_stop`, and there are no commands for them yet.
-- [ ] **Step while parked**: `StepInstruction` with the CPU in HALT (IE=0), STOP or wedged never reaches a boundary. Decide whether `stop_parked` should also stop `Step`.
+- [X] **Step modes**: `StepOver`, `StepScanline`, `StepFrame` are `todo!()` in `Debugger::should_stop`, and there are no commands for them yet.
+- [X] **Step while parked**: `StepInstruction` with the CPU in HALT (IE=0), STOP or wedged never reaches a boundary. Decide whether `stop_parked` should also stop `Step`.
 
 ## Frontend (GUI)
 

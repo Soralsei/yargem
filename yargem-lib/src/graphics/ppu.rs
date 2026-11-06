@@ -93,6 +93,7 @@ pub type Frame = [u8; SCREEN_W * SCREEN_H];
 
 pub struct Ppu {
     registers: RefCell<PpuRegisters>,
+
     vram: [[Cell<u8>; 0x2000]; 2],
 
     interrupt_request: InterruptRequest,
@@ -104,7 +105,6 @@ pub struct Ppu {
 
     front: RefCell<Box<Frame>>,
     back: RefCell<Box<Frame>>,
-    frame_ready: Cell<bool>,
 
     window_y_reached: Cell<bool>,
     window_ly: Cell<u8>,
@@ -120,6 +120,8 @@ pub struct Ppu {
     raiser: Raiser,
     /// Taken by the task when it starts: it is the only consumer.
     listener: Cell<Option<Listener>>,
+
+    frame_count: Cell<u64>,
 }
 
 impl Ppu {
@@ -137,14 +139,18 @@ impl Ppu {
             oam: [const { Cell::new(0) }; 160],
             front: RefCell::new(Box::new([0u8; SCREEN_W * SCREEN_H])),
             back: RefCell::new(Box::new([0u8; SCREEN_W * SCREEN_H])),
-            frame_ready: Cell::new(false),
             window_y_reached: Cell::new(false),
             window_ly: Cell::new(0),
             bus_controller: bus,
             is_cgb,
             raiser,
             listener: Cell::new(Some(listener)),
+            frame_count: Cell::new(0),
         }
+    }
+
+    pub fn immutable_view(&self) -> PpuView<'_> {
+        PpuView(self)
     }
 
     pub async fn task(this: Rc<Self>, timeline: Timeline<Fixed>) -> Infallible {
@@ -289,17 +295,17 @@ impl Ppu {
         // Deref through the guards: swapping the `RefMut`s themselves only
         // moves the two temporaries around and leaves both cells untouched.
         std::mem::swap(&mut *self.back.borrow_mut(), &mut *self.front.borrow_mut());
-        self.frame_ready.set(true);
+        self.frame_count.set(self.frame_count.get().wrapping_add(1));
+    }
+
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count.get()
     }
 
     pub fn framebuffer(&self) -> Ref<'_, Frame> {
         // Derefs the inner &Box<Frame> to a Box<Frame>, then derefs that Box<Frame> into a
         // Frame and return a reference to it
         Ref::map(self.front.borrow(), |front| &**front)
-    }
-
-    pub fn take_frame_ready(&self) -> bool {
-        self.frame_ready.replace(false)
     }
 
     async fn oam_scan(&self, ly: u8, timeline: &Timeline<Fixed>) -> Vec<ScannedObject> {
@@ -655,6 +661,24 @@ impl MemoryHandler for Ppu {
     }
 }
 
+/// Immutable view of the Ppu
+pub struct PpuView<'a>(&'a Ppu);
+
+impl<'a> PpuView<'a> {
+    pub fn registers(&self) -> Ref<'_, PpuRegisters> {
+        self.0.registers.borrow()
+    }
+
+    /// Convenience function to retrieve LY from the Ppu registers
+    pub fn ly(&self) -> u8 {
+        self.0.registers.borrow().ly()
+    }
+
+    pub fn frame_count(&self) -> u64 {
+        self.0.frame_count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,7 +815,7 @@ mod tests {
 
         h.run_frame();
         assert!(
-            h.ppu.take_frame_ready(),
+            h.ppu.frame_count.get() == 1,
             "no frame presented: the object fetch deadlocked mode 3"
         );
 
@@ -814,7 +838,7 @@ mod tests {
         h.run_frame();
         // If mode 3 ever deadlocked, LY would be parked wherever it stalled.
         assert!(
-            h.ppu.take_frame_ready(),
+            h.ppu.frame_count.get() == 1,
             "no frame was presented in 70224 dots: mode 3 never finished a full field"
         );
     }
@@ -874,7 +898,10 @@ mod tests {
         // Max cycles per frame
         h.run_frame();
 
-        assert!(!h.ppu.take_frame_ready(), "A cancelled frame was presented");
+        assert!(
+            h.ppu.frame_count.get() == 0,
+            "A cancelled frame was presented"
+        );
     }
 
     #[test]
@@ -896,8 +923,8 @@ mod tests {
 
         // Restarts on the next dot; VBlank lands 144 lines after that.
         h.ticks(144 * 456);
-        assert!(!h.ppu.take_frame_ready());
+        assert!(h.ppu.frame_count.get() == 0);
         h.ticks(1);
-        assert!(h.ppu.take_frame_ready());
+        assert!(h.ppu.frame_count.get() == 1);
     }
 }

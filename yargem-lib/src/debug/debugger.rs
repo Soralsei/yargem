@@ -13,6 +13,7 @@ use crate::{
         },
         watchpoint::{AccessKind, WatchSet, Watchpoint},
     },
+    graphics::ppu::PpuView,
     memory::mmu::{MemoryContext, MemoryHandler, Mmu, Source},
 };
 
@@ -117,8 +118,8 @@ pub enum RunMode {
     PauseRequested,
     Step { remaining: u32 },
     StepOver { ret: u16, sp: u16 },
-    StepScanline { ly: u8 },
-    StepFrame,
+    StepScanline { from: u8 },
+    StepFrame { from: u64 },
 }
 
 pub struct Debugger {
@@ -175,11 +176,11 @@ impl Debugger {
         self.attached
     }
 
-    pub fn should_stop(&mut self, addr: &BankAddr) -> Option<StopReason> {
+    pub fn should_stop(&mut self, addr: BankAddr, ppu: PpuView) -> Option<StopReason> {
         let reason = if let Some(hit) = self.watch_tap.take_hit() {
             Some(StopReason::Watchpoint(hit))
-        } else if self.breakpoints.breaks(addr) {
-            Some(StopReason::Breakpoint(*addr))
+        } else if self.breakpoints.breaks(&addr) {
+            Some(StopReason::Breakpoint(addr))
         } else {
             match &mut self.mode {
                 RunMode::Running | RunMode::Paused => None,
@@ -189,8 +190,14 @@ impl Debugger {
                 }
                 RunMode::PauseRequested => Some(StopReason::UserPause),
                 RunMode::StepOver { ret: _, sp: _ } => todo!("step-over not yet implemented"),
-                RunMode::StepScanline { ly: _ } => todo!("step-scanline not yet implemented"),
-                RunMode::StepFrame => todo!("step-frame not yet implemented"),
+                RunMode::StepScanline { from: ly } => {
+                    let lcd_on = ppu.registers().lcdc().lcd_ppu_enable;
+                    (!lcd_on || ppu.ly() != *ly).then_some(StopReason::Step)
+                }
+                RunMode::StepFrame { from } => {
+                    let lcd_on = ppu.registers().lcdc().lcd_ppu_enable;
+                    (!lcd_on || ppu.frame_count() != *from).then_some(StopReason::Step)
+                }
             }
         };
         if reason.is_some() {
@@ -205,7 +212,15 @@ impl Debugger {
                 self.mode = RunMode::Paused;
                 return Some(StopReason::UserPause);
             }
-            RunMode::Step { remaining } if remaining == 1 => {
+            RunMode::Step { .. } => {
+                self.mode = RunMode::Paused;
+                return Some(StopReason::Step);
+            }
+            RunMode::StepScanline { .. } => {
+                self.mode = RunMode::Paused;
+                return Some(StopReason::Step);
+            }
+            RunMode::StepFrame { .. } => {
                 self.mode = RunMode::Paused;
                 return Some(StopReason::Step);
             }
@@ -218,7 +233,13 @@ impl Debugger {
         matches!(self.mode, RunMode::Paused)
     }
 
-    pub fn handle(&mut self, cmd: DebugCommand, cpu: &Cpu, mmu: &Mmu) -> Option<DebugEvent> {
+    pub fn handle(
+        &mut self,
+        cmd: DebugCommand,
+        cpu: &Cpu,
+        mmu: &Mmu,
+        ppu: PpuView,
+    ) -> Option<DebugEvent> {
         match cmd {
             DebugCommand::ReadMemory { start, len } => {
                 let bytes: Vec<u8> = (start..(start + len))
@@ -250,6 +271,12 @@ impl Debugger {
             }
             DebugCommand::StepInstruction => {
                 self.mode = RunMode::Step { remaining: 1 };
+            }
+            DebugCommand::StepScanline => self.mode = RunMode::StepScanline { from: ppu.ly() },
+            DebugCommand::StepFrame => {
+                self.mode = RunMode::StepFrame {
+                    from: ppu.frame_count(),
+                }
             }
             DebugCommand::AddBreakpoint(_bank_addr) => {
                 self.breakpoints.add(_bank_addr);
@@ -313,7 +340,6 @@ mod test {
                 match self.system.run_frame() {
                     RunResult::Frame => {}
                     run => {
-                        eprintln!("{:?}", self.system.cpu.registers.borrow());
                         return run;
                     }
                 };

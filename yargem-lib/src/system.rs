@@ -78,7 +78,7 @@ impl Default for Settings {
 }
 
 pub struct System {
-    pub(crate) cpu: Rc<Cpu>,
+    cpu: Rc<Cpu>,
     mmu: Rc<Mmu>,
     irq: Rc<InterruptController>,
     ppu: Rc<Ppu>,
@@ -86,6 +86,9 @@ pub struct System {
     debugger: Debugger,
     time: Time,
     joypad: Rc<JoypadHandler>,
+
+    // last frame number
+    last_frame: u64,
 }
 
 impl System {
@@ -206,6 +209,7 @@ impl System {
             apu,
             time,
             joypad,
+            last_frame: 0,
         }
     }
 
@@ -219,13 +223,8 @@ impl System {
 
         while done < BUDGET {
             if let Some(pc) = self.cpu.take_boundary() {
-                if self.debugger.attached() {
-                    let bank = self.mmu.bank_at(pc);
-                    let addr = BankAddr { bank, address: pc };
-
-                    if let Some(reason) = self.debugger.should_stop(&addr) {
-                        return RunResult::Stopped(reason);
-                    }
+                if let Some(result) = self.debugger_stop(pc) {
+                    return result;
                 }
             }
 
@@ -240,12 +239,28 @@ impl System {
                 }
                 return RunResult::Idle;
             }
-            if self.ppu.take_frame_ready() {
+
+            let frame_count = self.ppu.frame_count();
+            if frame_count != self.last_frame {
+                self.last_frame = frame_count;
                 break;
             }
             done += advanced;
         }
         RunResult::Frame
+    }
+
+    fn debugger_stop(&mut self, pc: u16) -> Option<RunResult> {
+        if self.debugger.attached() {
+            let addr = BankAddr {
+                bank: self.mmu.bank_at(pc),
+                address: pc,
+            };
+            if let Some(reason) = self.debugger.should_stop(addr, self.ppu.immutable_view()) {
+                return Some(RunResult::Stopped(reason));
+            }
+        }
+        None
     }
 
     pub fn get_framebuffer(&self) -> Ref<'_, Frame> {
@@ -275,7 +290,8 @@ impl System {
     }
 
     pub fn debug(&mut self, cmd: DebugCommand) -> Option<DebugEvent> {
-        self.debugger.handle(cmd, &self.cpu, &self.mmu)
+        self.debugger
+            .handle(cmd, &self.cpu, &self.mmu, self.ppu.immutable_view())
     }
 
     pub fn attach_debugger(&mut self) {

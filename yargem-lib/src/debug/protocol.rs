@@ -33,6 +33,8 @@ pub enum DebugCommand {
     Pause,
     Resume,
     StepInstruction,
+    StepScanline,
+    StepFrame,
     AddBreakpoint(BankAddr),
     AddWatchpoint {
         bank_range: BankRange,

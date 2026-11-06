@@ -45,7 +45,7 @@ pub fn controls_bar(ui: &mut Ui, engine: Option<&EngineHandle>, state: &DebugSta
             ui,
             format!("{} Pause", egui_phosphor::regular::PAUSE),
             !state.paused,
-            Key::F6,
+            Some(Key::F6),
             || {
                 e.send(EngineCommand::Debug(DebugCommand::Pause));
             },
@@ -54,7 +54,7 @@ pub fn controls_bar(ui: &mut Ui, engine: Option<&EngineHandle>, state: &DebugSta
             ui,
             format!("{} Resume", egui_phosphor::regular::PLAY),
             state.paused,
-            Key::F5,
+            Some(Key::F5),
             || {
                 e.send(EngineCommand::Debug(DebugCommand::Resume));
             },
@@ -63,9 +63,28 @@ pub fn controls_bar(ui: &mut Ui, engine: Option<&EngineHandle>, state: &DebugSta
             ui,
             format!("{} Step", egui_phosphor::regular::ARROW_LINE_DOWN),
             state.paused,
-            Key::F11,
+            Some(Key::F11),
             || {
                 e.send(EngineCommand::Debug(DebugCommand::StepInstruction));
+            },
+        );
+        ui.separator();
+        ctrl_button(
+            ui,
+            format!("{} Step scanline", egui_phosphor::regular::LIST),
+            state.paused,
+            None,
+            || {
+                e.send(EngineCommand::Debug(DebugCommand::StepScanline));
+            },
+        );
+        ctrl_button(
+            ui,
+            format!("{} Step frame", egui_phosphor::regular::STOP),
+            state.paused,
+            Some(Key::F9),
+            || {
+                e.send(EngineCommand::Debug(DebugCommand::StepFrame));
             },
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -114,20 +133,20 @@ fn ctrl_button<'a>(
     ui: &mut Ui,
     atoms: impl IntoAtoms<'a>,
     enabled: bool,
-    shortcut_key: Key,
-    on_click: impl Fn(),
+    shortcut_key: Option<Key>,
+    on_action: impl Fn(),
 ) {
-    if ui
-        .add_enabled(
-            enabled,
-            Button::new(atoms).shortcut_text(shortcut_key.symbol_or_name()),
-        )
-        .clicked()
-        || ui.input_mut(|input| {
-            input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, shortcut_key))
-        })
-    {
-        (on_click)();
+    let mut button = Button::new(atoms);
+    let mut shortcut_pressed = false;
+    if let Some(key) = shortcut_key {
+        button = button.shortcut_text(key.symbol_or_name());
+        shortcut_pressed = ui.input_mut(|input| {
+            input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, key))
+        });
+    }
+    let activated = ui.add_enabled(enabled, button).clicked() || shortcut_pressed;
+    if activated {
+        (on_action)();
     }
 }
 
