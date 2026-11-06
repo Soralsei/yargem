@@ -35,6 +35,7 @@ const KEYMAP: [(Key, Button); 8] = [
 #[derive(Default)]
 pub struct DebugState {
     pub paused: bool,
+    pub attached: bool,
     pub last_stop: Option<StopReason>,
     pub last_regs: Option<RegisterSnapshot>,
     pub watchpoints: Vec<(WatchId, Watchpoint)>,
@@ -195,8 +196,6 @@ impl eframe::App for App {
                 DebugEvent::Resumed => {
                     if let Some(state) = &mut self.debug_state {
                         state.paused = false;
-                        state.last_regs = None;
-                        state.last_stop = None;
                     }
                 }
                 DebugEvent::Memory { start, bytes } => {}
@@ -210,10 +209,18 @@ impl eframe::App for App {
                     breaks,
                     watches,
                 } => {
-                    self.debug_state = Some(DebugState::new(regs, breaks, watches));
+                    match &mut self.debug_state {
+                        Some(state) => {
+                            state.last_regs = Some(regs);
+                            state.breakpoints = breaks;
+                            state.watchpoints = watches;
+                        }
+                        None => self.debug_state = Some(DebugState::new(regs, breaks, watches)),
+                    }
                     self.debug_panel.open = true;
                 }
                 DebugEvent::Detached => {
+                    self.debug_state = None;
                     self.debug_panel.open = false;
                 }
                 DebugEvent::Watchpoints(watches) => {

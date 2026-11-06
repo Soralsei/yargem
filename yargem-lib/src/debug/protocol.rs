@@ -50,6 +50,7 @@ pub enum DebugCommand {
     },
 }
 
+#[derive(Debug)]
 pub struct RegisterSnapshot(pub Registers);
 
 impl Deref for RegisterSnapshot {

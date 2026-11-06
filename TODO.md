@@ -16,7 +16,7 @@
 ## Frontend (GUI)
 
 - [ ] **Debugger window**: `debugger_panel` is still an empty right panel. Move it to an `egui::Window` struct holding only input buffers (breakpoint address, watch range, access kind, parse error). It shows registers and breakpoint/watchpoint lists from `DebugState`.
-- [ ] **Run bar**: show the stop reason (breakpoint address, watchpoint hit details), not just the pc (`ui/debug.rs` TODO). Add keyboard shortcuts for pause/step/resume.
+- [X] **Run bar**: show the stop reason (breakpoint address, watchpoint hit details), not just the pc (`ui/debug.rs` TODO). Add keyboard shortcuts for pause/step/resume.
 - **Memory viewer**: `ui/memory.rs` and `memory_window` are stubs. Hex view with `ScrollArea::show_rows`, request only the visible range with `ReadMemory`, cache the reply, add a go-to address and later a bank selector.
 - [ ] **Input manager**: `input/input_map.rs` and `input/manager.rs` are empty. Configurable keymap; send `Button` commands only on change (currently 8 commands per repaint).
 - **Palette in settings**: `DMG` is hardcoded in `ui/screen.rs`. Goes in the persisted `Config`.
