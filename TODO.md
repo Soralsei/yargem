@@ -40,7 +40,7 @@
 ## Emulator core
 
 - [ ] MBC2, MBC3, MBC5, MBC6, MBC7 (`memory/mbc.rs`), plus unknown cartridge types currently `unimplemented!()`.
-  - [ ] MBC2
+  - [X] MBC2
   - [ ] MBC3
   - [ ] MBC5
   - [ ] MBC6

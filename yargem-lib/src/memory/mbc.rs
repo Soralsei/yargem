@@ -1,6 +1,8 @@
 #![allow(unused)]
 use std::cell::{Cell, RefCell};
 
+use yargem_common::Reg8::W;
+
 use crate::{
     is_bit_set, memory::mmu::MemoryContext, util::bit_operations::addressing_number_of_bits,
 };
@@ -26,7 +28,7 @@ trait BankedMemHandler {
 enum MbcType {
     MbcNone(MbcNone),
     Mbc1(Mbc1),
-    Mbc2(MbcNone),
+    Mbc2(Mbc2),
     Mbc3(MbcNone),
     Mbc5(MbcNone),
     Mbc6(MbcNone),
@@ -38,7 +40,8 @@ impl MbcType {
         match code {
             0x00 => MbcType::MbcNone(MbcNone::new(rom, ram_size)),
             0x01..=0x03 => MbcType::Mbc1(Mbc1::new(rom, ram_size)),
-            _ => unimplemented!("Mbc type 0x{:02X} not yet implemented", code),
+            0x05..=0x06 => MbcType::Mbc2(Mbc2::new(rom)),
+            _ => unimplemented!("Mbc type 0x{code:02X} not yet implemented"),
         }
     }
 }
@@ -48,7 +51,7 @@ impl BankedMemHandler for MbcType {
         match self {
             MbcType::MbcNone(mbc) => mbc.read(address),
             MbcType::Mbc1(mbc) => mbc.read(address),
-            MbcType::Mbc2(_) => todo!(),
+            MbcType::Mbc2(mbc) => mbc.read(address),
             MbcType::Mbc3(_) => todo!(),
             MbcType::Mbc5(_) => todo!(),
             MbcType::Mbc6(_) => todo!(),
@@ -60,7 +63,7 @@ impl BankedMemHandler for MbcType {
         match self {
             MbcType::MbcNone(mbc) => mbc.write(address, value),
             MbcType::Mbc1(mbc) => mbc.write(address, value),
-            MbcType::Mbc2(_) => todo!(),
+            MbcType::Mbc2(mbc) => mbc.write(address, value),
             MbcType::Mbc3(_) => todo!(),
             MbcType::Mbc5(_) => todo!(),
             MbcType::Mbc6(_) => todo!(),
@@ -72,7 +75,7 @@ impl BankedMemHandler for MbcType {
         match self {
             MbcType::MbcNone(mbc) => mbc.bank_at(address),
             MbcType::Mbc1(mbc) => mbc.bank_at(address),
-            MbcType::Mbc2(_) => todo!(),
+            MbcType::Mbc2(mbc) => mbc.bank_at(address),
             MbcType::Mbc3(_) => todo!(),
             MbcType::Mbc5(_) => todo!(),
             MbcType::Mbc6(_) => todo!(),
@@ -153,7 +156,7 @@ struct Mbc1 {
 }
 
 impl Mbc1 {
-    pub fn new(rom: Vec<u8>, ram_size: usize) -> Self {
+    fn new(rom: Vec<u8>, ram_size: usize) -> Self {
         debug_assert!(ram_size == 0 || ram_size.is_power_of_two());
         Self {
             rom,
@@ -267,14 +270,14 @@ impl BankedMemHandler for Mbc1 {
                 };
                 read_value
             }
-            _ => unreachable!("Invalid memory read at address 0x{:04X}", address),
+            _ => unreachable!("Invalid memory read at 0x{address:04X}"),
         }
     }
 
     fn write(&mut self, address: u16, value: u8) {
         match address {
             0x0000..=0x1FFF => {
-                self.ram_enable = value & 0b1111 == 0xA;
+                self.ram_enable = value & 0xF == 0xA;
             }
             0x2000..=0x3FFF => {
                 self.rom_bank_number = value & 0b11111;
@@ -290,7 +293,7 @@ impl BankedMemHandler for Mbc1 {
                     self.ram[offset] = value;
                 }
             }
-            _ => unreachable!("Invalid memory write at address 0x{:04X}", address),
+            _ => unreachable!("Invalid memory write at 0x{address:04X}"),
         }
     }
 
@@ -299,10 +302,82 @@ impl BankedMemHandler for Mbc1 {
             0x0000..=0x3FFF => Some(self.ram_bank() << 5),
             0xA000..=0xBFFF => Some(self.ram_bank()),
             0x4000..=0x7FFF => Some(self.rom_bank()),
-            _ => unreachable!(
-                "unhandled bank resolution in MBC1 at address 0x{:04X}",
-                address
-            ),
+            _ => unreachable!("unhandled bank resolution in MBC1 at address 0x{address:04X}",),
+        }
+    }
+}
+
+struct Mbc2 {
+    rom: Vec<u8>,
+    ram: Vec<u8>,
+    ram_enable: bool,
+    rom_bank_number: u8,
+}
+
+impl Mbc2 {
+    fn new(rom: Vec<u8>) -> Self {
+        Self {
+            rom,
+            ram: vec![0u8; 0x200],
+            ram_enable: false,
+            rom_bank_number: 0x00,
+        }
+    }
+
+    fn maybe_one_bank(bank_number: u8) -> u8 {
+        if bank_number & 0b1111 == 0x00 {
+            0x01
+        } else {
+            bank_number & 0b1111
+        }
+    }
+
+    fn bank1_offset(&self, address: u16) -> usize {
+        let bank_number = Mbc2::maybe_one_bank(self.rom_bank_number) as usize;
+        // Get the address inside the selected bank
+        // strictly equivalent to bank_number * ROM_BANK_SIZE + (address - 0x4000)
+        (bank_number * ROM_BANK_SIZE) | (address as usize & (ROM_BANK_SIZE - 1))
+    }
+}
+
+impl BankedMemHandler for Mbc2 {
+    fn read(&self, address: u16) -> u8 {
+        match address {
+            0x0000..=0x3FFF => self.rom[address as usize],
+            0x4000..=0x7FFF => {
+                let offset = self.bank1_offset(address);
+                self.rom[offset]
+            }
+            0xA000..=0xBFFF => {
+                let offset = (address & (0x200 - 1)) as usize; // echoes 15 times
+                self.ram[offset]
+            }
+            _ => unreachable!("invalid read in Mbc2 at 0x{address:04X}"),
+        }
+    }
+
+    fn write(&mut self, address: u16, value: u8) {
+        match address {
+            0x0000..=0x3FFF => {
+                // ROM bank1 number write
+                if is_bit_set!(address, 8) {
+                    self.rom_bank_number = value & 0xF;
+                }
+                // RAM enable write
+                else {
+                    self.ram_enable = (value & 0xF) == 0xA;
+                }
+            }
+            0x4000..=0xBFFF => {} // Block writes
+            _ => unreachable!("invalid write in Mbc2 at 0x{address:04X}"),
+        }
+    }
+
+    fn bank_at(&self, address: u16) -> Option<u16> {
+        if (0x4000..=0x7FFF).contains(&address) {
+            Some(Mbc2::maybe_one_bank(self.rom_bank_number) as u16)
+        } else {
+            None
         }
     }
 }
