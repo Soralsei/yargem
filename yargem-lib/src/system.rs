@@ -9,10 +9,11 @@ use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
 use crate::memory::bus::{Bus, CpuBus};
+use crate::memory::mbc::{Cartridge, SizeMismatch};
 use crate::memory::mmu::AddressMap;
 use crate::timer::Timer;
 
-use super::memory::mbc::Mbc;
+use super::memory::mbc::BootRom;
 use super::memory::mmu::MemoryHandler;
 
 use super::cpu::cpu::Cpu;
@@ -83,6 +84,7 @@ pub struct System {
     irq: Rc<InterruptController>,
     ppu: Rc<Ppu>,
     apu: Rc<Apu>,
+    cart: Rc<Cartridge>,
     debugger: Debugger,
     time: Time,
     joypad: Rc<JoypadHandler>,
@@ -101,8 +103,9 @@ impl System {
             None => PowerOn::PostBoot,
         };
 
-        let mbc = Rc::new(Mbc::new(boot_rom, rom));
-        let is_cgb = mbc.cartridge().is_cgb_only() || settings.is_cgb_override;
+        let boot_rom = Rc::new(BootRom::new(boot_rom));
+        let cart = Rc::new(Cartridge::new(rom));
+        let is_cgb = cart.is_cgb_only() || settings.is_cgb_override;
 
         let interrupt_controller = Rc::new(InterruptController::new());
         let serial = Rc::new(Serial::new(interrupt_controller.request(), LogSink));
@@ -142,9 +145,10 @@ impl System {
             map.add((0xA000, 0xBFFF), Rc::new(BlaargSpy));
         }
 
-        map.add((0x0000, 0x7FFF), mbc.clone());
-        map.add((0xFF50, 0xFF50), mbc.clone());
-        map.add((0xA000, 0xBFFF), mbc.clone());
+        map.add((0x0000, 0x7FFF), boot_rom.clone());
+        map.add((0xFF50, 0xFF50), boot_rom.clone());
+        map.add((0x0000, 0x7FFF), cart.clone());
+        map.add((0xA000, 0xBFFF), cart.clone());
 
         // PPU VRAM
         map.add((0x8000, 0x9FFF), ppu.clone());
@@ -207,6 +211,7 @@ impl System {
             irq: interrupt_controller,
             ppu,
             apu,
+            cart,
             time,
             joypad,
             last_frame: 0,
@@ -300,5 +305,17 @@ impl System {
 
     pub fn detach_debugger(&mut self) {
         self.debugger.detach();
+    }
+
+    pub fn battery_ram(&self) -> Option<Vec<u8>> {
+        self.cart.battery_ram()
+    }
+
+    pub fn load_battery_ram(&self, data: &[u8]) -> Result<(), SizeMismatch> {
+        self.cart.load_battery_ram(data)
+    }
+
+    pub fn take_ram_dirty(&self) -> bool {
+        self.cart.take_ram_dirty()
     }
 }

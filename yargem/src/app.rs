@@ -76,10 +76,14 @@ impl App {
         ctx.egui_ctx.set_fonts(fonts);
         style::install(&ctx.egui_ctx);
 
+        let file_dialog = FileDialog::new()
+            .add_file_filter_extensions("Game boy roms", vec!["gb", "gbc"])
+            .default_file_filter("Game boy roms");
+
         Self {
             audio: AudioManager::new(),
             screen: Screen::new(&ctx.egui_ctx),
-            file_dialog: FileDialog::default(),
+            file_dialog,
             debug_panel: DebugPanel::new(),
             engine: None,
             debug_state: None,
@@ -250,10 +254,11 @@ impl eframe::App for App {
         self.file_dialog.update(ui);
 
         if let Some(path) = self.file_dialog.take_picked() {
-            match fs::read(path) {
+            match fs::read(&path) {
                 Ok(rom) => {
                     let ctx = ui.clone();
                     let engine = spawn_engine(
+                        path.with_extension("sav"),
                         None,
                         rom,
                         Settings::default(),
@@ -266,7 +271,9 @@ impl eframe::App for App {
                     }
                     self.engine = Some(engine);
                 }
-                Err(e) => {}
+                Err(e) => {
+                    // TODO show error in some UI banner or something
+                }
             }
         }
 

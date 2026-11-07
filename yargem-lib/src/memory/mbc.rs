@@ -1,7 +1,10 @@
-#![allow(unused)]
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    error::Error,
+    fmt::Display,
+};
 
-use yargem_common::Reg8::W;
+use phf::phf_set;
 
 use crate::{
     is_bit_set, memory::mmu::MemoryContext, util::bit_operations::addressing_number_of_bits,
@@ -17,86 +20,49 @@ const RAM_BANK_SIZE: usize = 8 * 1024;
 const ROM_BANK_SIZE: usize = 16 * 1024;
 const MAX_ROM_SIZE_NORMAL: usize = 512 * 1024;
 
-trait BankedMemHandler {
+const BATTERY_CODES: phf::Set<u8> =
+    phf_set!(0x03u8, 0x06, 0x09, 0x0D, 0x0F, 0x10, 0x13, 0x1B, 0x1E, 0x22, 0xFF);
+
+trait Mapper {
     fn read(&self, address: u16) -> u8;
     fn write(&mut self, address: u16, value: u8);
-    fn bank_at(&self, address: u16) -> Option<u16> {
+    fn bank_at(&self, _address: u16) -> Option<u16> {
         None
     }
-}
-
-enum MbcType {
-    MbcNone(MbcNone),
-    Mbc1(Mbc1),
-    Mbc2(Mbc2),
-    Mbc3(MbcNone),
-    Mbc5(MbcNone),
-    Mbc6(MbcNone),
-    Mbc7(MbcNone),
-}
-
-impl MbcType {
-    pub fn new(code: u8, rom: Vec<u8>, rom_size: usize, ram_size: usize) -> MbcType {
-        match code {
-            0x00 => MbcType::MbcNone(MbcNone::new(rom, ram_size)),
-            0x01..=0x03 => MbcType::Mbc1(Mbc1::new(rom, ram_size)),
-            0x05..=0x06 => MbcType::Mbc2(Mbc2::new(rom)),
-            _ => unimplemented!("Mbc type 0x{code:02X} not yet implemented"),
-        }
+    fn name(&self) -> &'static str;
+    fn ram(&mut self) -> &mut [u8] {
+        &mut []
     }
 }
 
-impl BankedMemHandler for MbcType {
-    fn read(&self, address: u16) -> u8 {
-        match self {
-            MbcType::MbcNone(mbc) => mbc.read(address),
-            MbcType::Mbc1(mbc) => mbc.read(address),
-            MbcType::Mbc2(mbc) => mbc.read(address),
-            MbcType::Mbc3(_) => todo!(),
-            MbcType::Mbc5(_) => todo!(),
-            MbcType::Mbc6(_) => todo!(),
-            MbcType::Mbc7(_) => todo!(),
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+pub struct SizeMismatch {
+    pub expected: usize,
+    pub actual: usize,
+}
 
-    fn write(&mut self, address: u16, value: u8) {
-        match self {
-            MbcType::MbcNone(mbc) => mbc.write(address, value),
-            MbcType::Mbc1(mbc) => mbc.write(address, value),
-            MbcType::Mbc2(mbc) => mbc.write(address, value),
-            MbcType::Mbc3(_) => todo!(),
-            MbcType::Mbc5(_) => todo!(),
-            MbcType::Mbc6(_) => todo!(),
-            MbcType::Mbc7(_) => todo!(),
-        }
-    }
+impl Error for SizeMismatch {}
 
-    fn bank_at(&self, address: u16) -> Option<u16> {
-        match self {
-            MbcType::MbcNone(mbc) => mbc.bank_at(address),
-            MbcType::Mbc1(mbc) => mbc.bank_at(address),
-            MbcType::Mbc2(mbc) => mbc.bank_at(address),
-            MbcType::Mbc3(_) => todo!(),
-            MbcType::Mbc5(_) => todo!(),
-            MbcType::Mbc6(_) => todo!(),
-            MbcType::Mbc7(_) => todo!(),
-        }
+impl Display for SizeMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Size mismatch error (expected {}, got {})",
+            self.expected, self.actual
+        )
     }
 }
 
-impl fmt::Display for MbcType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let display_name = match self {
-            MbcType::MbcNone(_) => "None",
-            MbcType::Mbc1(_) => "MBC1",
-            MbcType::Mbc2(_) => "MBC2",
-            MbcType::Mbc3(_) => "MBC3",
-            MbcType::Mbc5(_) => "MBC5",
-            MbcType::Mbc6(_) => "MBC6",
-            MbcType::Mbc7(_) => "MBC7",
-        };
-        write!(f, "{}", display_name)
+fn get_bank_num_mask(rom_size: usize) -> usize {
+    let num_banks: usize = rom_size.div_ceil(ROM_BANK_SIZE) as usize;
+    let num_bits = addressing_number_of_bits(num_banks);
+    // Should never occur, but just to be safe
+    // avoids overflow
+    let usize_bits = usize::BITS as usize;
+    if num_bits >= usize_bits {
+        return !0usize;
     }
+    (1 << num_bits) - 1
 }
 
 struct MbcNone {
@@ -117,7 +83,7 @@ impl MbcNone {
     }
 }
 
-impl BankedMemHandler for MbcNone {
+impl Mapper for MbcNone {
     fn read(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x7FFF => self.rom[address as usize],
@@ -141,6 +107,10 @@ impl BankedMemHandler for MbcNone {
             }
             _ => unreachable!("Invalid memory write at address 0x{:04X}", address),
         }
+    }
+
+    fn name(&self) -> &'static str {
+        "No MBC"
     }
 }
 
@@ -178,11 +148,7 @@ impl Mbc1 {
         let offset = address as usize & (RAM_BANK_SIZE - 1);
         // A >512 KiB ROM spends the 2-bit register on upper ROM bank bits, so RAM
         // is pinned to bank 0.
-        let bank = if self.advanced_mode && !self.rom_needs_extended_banking() {
-            (self.ram_bank_number & 0b11) as usize
-        } else {
-            0
-        };
+        let bank = self.ram_bank() as usize;
         Some(((bank * RAM_BANK_SIZE) | offset) & self.ram_mask)
     }
 
@@ -202,20 +168,8 @@ impl Mbc1 {
         self.rom.len() > MAX_ROM_SIZE_NORMAL
     }
 
-    fn get_bank_num_mask(&self) -> usize {
-        let num_banks: usize = self.rom.len().div_ceil(ROM_BANK_SIZE) as usize;
-        let num_bits = addressing_number_of_bits(num_banks);
-        // Should never occur, but just to be safe
-        // avoids overflow
-        let usize_bits = usize::BITS as usize;
-        if (num_bits >= usize_bits) {
-            return !0usize;
-        }
-        (1 << num_bits) - 1
-    }
-
     fn rom_bank(&self) -> u16 {
-        let bank_mask = self.get_bank_num_mask() as u8;
+        let bank_mask = get_bank_num_mask(self.rom.len()) as u8;
         let corrected_bank1 = Mbc1::maybe_one_bank(self.rom_bank_number);
         let bank2_number: u8 = if self.rom_needs_extended_banking() {
             (self.ram_bank_number & 0b11) << 5
@@ -230,15 +184,20 @@ impl Mbc1 {
         // Should be 0b0[ram_bank_number & 0b11]00000
         // ex: ram_bank_number = 0b10 => bank_number = 0b01000000
         // ram_bank_number can only ever be in {0x00, 0x20, 0x40, 0x60}
-        (if self.advanced_mode && self.rom_needs_extended_banking() {
-            (self.ram_bank_number & 0b11)
+        if self.advanced_mode && !self.rom_needs_extended_banking() {
+            (self.ram_bank_number & 0b11) as u16
         } else {
             0
-        }) as u16
+        }
     }
 
     fn bank0_offset(&self, address: u16) -> usize {
-        let bank_number = (self.ram_bank() << 5) as usize;
+        let ram_bank = if self.advanced_mode && self.rom_needs_extended_banking() {
+            (self.ram_bank_number & 0b11) << 5 as u16
+        } else {
+            0
+        };
+        let bank_number = ram_bank as usize;
         // bits 20 and 19 => bank_number, bits 18-14 => 0, bits 13-0 => address <= 0x3FFF
         (bank_number * ROM_BANK_SIZE) | (address as usize)
     }
@@ -251,7 +210,7 @@ impl Mbc1 {
     }
 }
 
-impl BankedMemHandler for Mbc1 {
+impl Mapper for Mbc1 {
     fn read(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x3FFF => {
@@ -305,21 +264,32 @@ impl BankedMemHandler for Mbc1 {
             _ => unreachable!("unhandled bank resolution in MBC1 at address 0x{address:04X}",),
         }
     }
+
+    fn name(&self) -> &'static str {
+        "MBC1"
+    }
+
+    fn ram(&mut self) -> &mut [u8] {
+        &mut self.ram
+    }
 }
 
 struct Mbc2 {
     rom: Vec<u8>,
     ram: Vec<u8>,
     ram_enable: bool,
+    rom_bank_mask: usize,
     rom_bank_number: u8,
 }
 
 impl Mbc2 {
     fn new(rom: Vec<u8>) -> Self {
+        let rom_size = rom.len();
         Self {
             rom,
             ram: vec![0u8; 0x200],
             ram_enable: false,
+            rom_bank_mask: get_bank_num_mask(rom_size),
             rom_bank_number: 0x00,
         }
     }
@@ -333,14 +303,14 @@ impl Mbc2 {
     }
 
     fn bank1_offset(&self, address: u16) -> usize {
-        let bank_number = Mbc2::maybe_one_bank(self.rom_bank_number) as usize;
+        let bank_number = Mbc2::maybe_one_bank(self.rom_bank_number) as usize & self.rom_bank_mask;
         // Get the address inside the selected bank
         // strictly equivalent to bank_number * ROM_BANK_SIZE + (address - 0x4000)
         (bank_number * ROM_BANK_SIZE) | (address as usize & (ROM_BANK_SIZE - 1))
     }
 }
 
-impl BankedMemHandler for Mbc2 {
+impl Mapper for Mbc2 {
     fn read(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x3FFF => self.rom[address as usize],
@@ -368,7 +338,11 @@ impl BankedMemHandler for Mbc2 {
                     self.ram_enable = (value & 0xF) == 0xA;
                 }
             }
-            0x4000..=0xBFFF => {} // Block writes
+            0x4000..=0x9FFF => {} // Block writes
+            0xA000..=0xBFFF => {
+                let offset = (address & (0x200 - 1)) as usize; // echoes 15 times
+                self.ram[offset] = value;
+            }
             _ => unreachable!("invalid write in Mbc2 at 0x{address:04X}"),
         }
     }
@@ -380,6 +354,10 @@ impl BankedMemHandler for Mbc2 {
             None
         }
     }
+
+    fn name(&self) -> &'static str {
+        "MBC2"
+    }
 }
 
 pub struct Cartridge {
@@ -388,13 +366,24 @@ pub struct Cartridge {
     cgb_only: bool,
     /// Banking registers are the only mutable cartridge state, and nothing
     /// re-enters the cartridge, so one cell here keeps `MemoryBank` on `&mut self`.
-    mbc: RefCell<MbcType>,
+    mbc: RefCell<Box<dyn Mapper>>,
     rom_size: usize,
     ram_size: usize,
+    ram_dirty: Cell<bool>,
+    has_battery: bool,
 }
 
 fn checksum(rom: &[u8]) {
     println!("Should verify cartridge checksum");
+}
+
+fn mapper_for(mbc_type: u8, rom: Vec<u8>, ram_size: usize) -> Box<dyn Mapper> {
+    match mbc_type {
+        0x00 => Box::new(MbcNone::new(rom, ram_size)),
+        0x01..=0x03 => Box::new(Mbc1::new(rom, ram_size)),
+        0x05 | 0x06 => Box::new(Mbc2::new(rom)),
+        _ => panic!("unhandled MBC type ${mbc_type:02X}"),
+    }
 }
 
 impl Cartridge {
@@ -420,9 +409,11 @@ impl Cartridge {
             title: title.to_string(),
             cgb: is_bit_set!(rom[0x143], CGB),
             cgb_only: is_bit_set!(rom[0x143], CGB_ONLY),
-            mbc: RefCell::new(MbcType::new(mbc_type, rom, rom_size, ram_size)),
+            mbc: RefCell::new(mapper_for(mbc_type, rom, ram_size)),
             rom_size,
             ram_size,
+            ram_dirty: Cell::new(false),
+            has_battery: BATTERY_CODES.contains(&mbc_type),
         }
     }
 
@@ -430,16 +421,29 @@ impl Cartridge {
         self.cgb_only
     }
 
-    fn read(&self, address: u16) -> u8 {
-        self.mbc.borrow().read(address)
+    pub fn battery_ram(&self) -> Option<Vec<u8>> {
+        self.has_battery
+            .then_some(self.mbc.borrow_mut().ram().to_vec())
     }
 
-    fn write(&self, address: u16, value: u8) {
-        self.mbc.borrow_mut().write(address, value)
+    pub fn load_battery_ram(&self, data: &[u8]) -> Result<(), SizeMismatch> {
+        let mut mbc = self.mbc.borrow_mut();
+        let ram = mbc.ram();
+
+        let expected = ram.len();
+        let actual = data.len();
+
+        if expected != actual {
+            return Err(SizeMismatch { expected, actual });
+        }
+
+        ram.copy_from_slice(data);
+
+        Ok(())
     }
 
-    fn bank_at(&self, address: u16) -> Option<u16> {
-        self.mbc.borrow().bank_at(address)
+    pub fn take_ram_dirty(&self) -> bool {
+        self.ram_dirty.take()
     }
 }
 
@@ -453,72 +457,74 @@ impl fmt::Display for Cartridge {
             CGB : {} | CGB only : {},
             RAM size : {} KiB,
             ROM size : {} KiB
+            Has battery : {}
         }}",
             self.title,
-            self.mbc.borrow(),
+            self.mbc.borrow().name(),
             self.cgb,
             self.cgb_only,
             self.ram_size / 1024,
-            self.rom_size / 1024
+            self.rom_size / 1024,
+            self.has_battery
         )
     }
 }
 
-pub struct Mbc {
-    cart: Cartridge,
+impl MemoryHandler for Cartridge {
+    fn read(&self, address: u16, _: MemoryContext<'_>) -> u8 {
+        self.mbc.borrow().read(address)
+    }
+
+    fn write(&self, address: u16, value: u8, _: MemoryContext<'_>) {
+        if (0xA000..=0xBFFF).contains(&address) {
+            self.ram_dirty.set(true);
+        }
+        self.mbc.borrow_mut().write(address, value)
+    }
+
+    fn bank_at(&self, address: u16) -> Option<u16> {
+        self.mbc.borrow().bank_at(address)
+    }
+}
+
+pub struct BootRom {
     boot_rom: Vec<u8>,
     boot_rom_enabled: Cell<bool>,
 }
 
-impl Mbc {
-    pub fn new(boot_rom: Option<Vec<u8>>, rom: Vec<u8>) -> Self {
-        let cart = Cartridge::new(rom);
-        println!("{}", cart);
-
+impl BootRom {
+    pub fn new(boot_rom: Option<Vec<u8>>) -> Self {
         match boot_rom {
             Some(boot_rom) => Self {
-                cart,
                 boot_rom,
                 boot_rom_enabled: Cell::new(true),
             },
             None => Self {
-                cart,
                 boot_rom: Vec::with_capacity(0),
                 boot_rom_enabled: Cell::new(false),
             },
         }
     }
 
-    pub fn cartridge(&self) -> &Cartridge {
-        &self.cart
-    }
-
     #[inline]
-    fn in_boot_rom(&self, address: u16) -> bool {
+    fn covers(&self, address: u16) -> bool {
         address < 0x100 || (self.boot_rom.len() == 0x900 && (0x200..0x900).contains(&address))
     }
 }
 
-impl MemoryHandler for Mbc {
-    fn read(&self, address: u16, _next: MemoryContext<'_>) -> u8 {
-        if self.boot_rom_enabled.get() && self.in_boot_rom(address) {
+impl MemoryHandler for BootRom {
+    fn read(&self, address: u16, next: MemoryContext<'_>) -> u8 {
+        if self.boot_rom_enabled.get() && self.covers(address) {
             return self.boot_rom[address as usize];
         }
-        self.cart.read(address)
+        next.read(address)
     }
 
-    fn write(&self, address: u16, value: u8, _next: MemoryContext<'_>) {
-        if self.boot_rom_enabled.get() && self.in_boot_rom(address) {
-            eprintln!("Write to boot rom detected ?!");
-            return;
-        } else if address == 0xFF50 {
+    fn write(&self, address: u16, value: u8, next: MemoryContext<'_>) {
+        if address == 0xFF50 {
             self.boot_rom_enabled.set(false);
             return;
         }
-        self.cart.write(address, value)
-    }
-
-    fn bank_at(&self, address: u16) -> Option<u16> {
-        self.cart.bank_at(address)
+        next.write(address, value)
     }
 }

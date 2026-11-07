@@ -1,4 +1,6 @@
 use std::{
+    fs, io,
+    path::PathBuf,
     sync::mpsc,
     thread::{self, JoinHandle},
     time::Duration,
@@ -48,6 +50,7 @@ impl Drop for EngineHandle {
 }
 
 pub fn spawn_engine(
+    save_path: PathBuf,
     boot: Option<Vec<u8>>,
     rom: Vec<u8>,
     settings: Settings,
@@ -60,7 +63,7 @@ pub fn spawn_engine(
     let thread = thread::Builder::new()
         .name("engine".into())
         .spawn(move || {
-            Engine {
+            let engine = Engine {
                 // built inside the thread: the Rcs never cross
                 sys: System::new(boot, rom, settings),
                 commands: cmd_rx,
@@ -68,8 +71,9 @@ pub fn spawn_engine(
                 frames: frame_in,
                 audio: None, // arrives as AudioSink once a device is up
                 request_repaint,
-            }
-            .run()
+                save_path,
+            };
+            engine.run();
         })
         .expect("failed to spawn engine thread");
 
@@ -83,23 +87,39 @@ pub fn spawn_engine(
 
 struct Engine {
     sys: System,
+
     commands: mpsc::Receiver<EngineCommand>,
     events: mpsc::Sender<DebugEvent>,
     frames: triple_buffer::Input<Frame>,
+
     audio: Option<AudioSink>,
     request_repaint: Box<dyn Fn() + Send>,
+
+    save_path: PathBuf,
 }
 
 impl Engine {
     fn run(mut self) {
+        // Load save file if it exists
+        match fs::read(&self.save_path) {
+            Ok(save_data) => match self.sys.load_battery_ram(&save_data) {
+                Ok(_) => {}
+                Err(e) => eprintln!("Failed to load save file: {e}"),
+            },
+            Err(e) if !matches!(e.kind(), io::ErrorKind::NotFound) => eprintln!("{e}"),
+            Err(e) => {
+                eprintln!("{e}")
+            }
+        }
         while self.drain() {
+            // TODO periodically call save_ram if take_ram_dirty
             match self.sys.run_frame() {
                 RunResult::Frame => self.frames.write(*self.sys.get_framebuffer()),
                 // Nothing can happen without outside action: wait for it.
                 RunResult::Idle | RunResult::Paused => {
                     match self.commands.recv() {
                         Ok(cmd) => self.handle(cmd),
-                        Err(_) => return,
+                        Err(_) => break,
                     }
                     (self.request_repaint)();
                     continue;
@@ -113,6 +133,29 @@ impl Engine {
             }
             (self.request_repaint)();
             self.pace();
+        }
+
+        if self.sys.take_ram_dirty() {
+            if let Some(save_data) = self.sys.battery_ram() {
+                self.save_ram(save_data);
+            }
+        }
+    }
+
+    fn save_ram(&self, save_data: Vec<u8>) {
+        // TODO smarter path handling for saves
+        let tmp_path = self.save_path.with_added_extension("tmp");
+
+        let res =
+            fs::write(&tmp_path, save_data).and_then(|()| fs::rename(&tmp_path, &self.save_path));
+
+        match res {
+            Ok(_) => println!("Saved game to '{}'", self.save_path.display()),
+            Err(e) => {
+                eprintln!("Failed to save game: {e}");
+                // Best effort cleanup
+                let _ = fs::remove_file(tmp_path);
+            }
         }
     }
 
