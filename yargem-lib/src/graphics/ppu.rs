@@ -7,6 +7,7 @@ use std::rc::Rc;
 use crate::clock::{signal, Fixed, Listener, Raiser, Timeline};
 use crate::cpu::interrupt::InterruptRequest;
 use crate::graphics::attributes::{BgAttributes, CGBBank, ObjectAttribute, TilePriority};
+use crate::graphics::cgb::CgbPpu;
 use crate::graphics::fifo::{BgFIFO, ObjFIFO, Pixel};
 use crate::graphics::registers::{ObjSize, PpuMode, PpuRegisters, TileAddressing, TileArea};
 use crate::memory::bus::{Bus, BusOwner, BusType};
@@ -24,7 +25,7 @@ struct ScannedObject {
 }
 
 impl ScannedObject {
-    pub fn into_request(&self, ly: u8, size: ObjSize) -> ObjRequest {
+    pub fn into_request(&self, ly: u8, size: ObjSize, cgb_mode: bool) -> ObjRequest {
         let flags = self.attributes.flags();
         let height = size.as_height();
 
@@ -46,7 +47,11 @@ impl ScannedObject {
             fine_y: row & 7,
             flip_x: flags.x_flip(),
             x: self.attributes.x(),
-            palette: flags.dmg_palette() as u8,
+            palette: if cgb_mode {
+                flags.cgb_palette()
+            } else {
+                flags.dmg_palette() as u8
+            },
             priority: flags.priority(),
             oam_index: self.index as u8,
             bank: flags.bank(),
@@ -89,7 +94,7 @@ impl LineState {
     }
 }
 
-pub type Frame = [u8; SCREEN_W * SCREEN_H];
+pub type Frame = [u16; SCREEN_W * SCREEN_H];
 
 pub struct Ppu {
     registers: RefCell<PpuRegisters>,
@@ -114,7 +119,8 @@ pub struct Ppu {
     /// fetches, which go through `peek`/`poke`, stay exempt.
     bus_controller: Rc<Bus>,
 
-    is_cgb: bool,
+    cgb: Option<CgbPpu>,
+    dmg_palette: [u16; 4],
 
     /// Raised on every LCDC write, so the task sees the LCD switch on or off.
     raiser: Raiser,
@@ -130,22 +136,25 @@ impl Ppu {
         bus: Rc<Bus>,
         is_cgb: bool,
         power_on: PowerOn,
+        dmg_palette: [u16; 4],
     ) -> Self {
         let (raiser, listener) = signal();
+        let cgb = is_cgb.then_some(CgbPpu::new());
         Self {
             registers: RefCell::new(PpuRegisters::new(power_on)),
             interrupt_request,
             vram: core::array::from_fn(|_| [const { Cell::new(0) }; 0x2000]),
             oam: [const { Cell::new(0) }; 160],
-            front: RefCell::new(Box::new([0u8; SCREEN_W * SCREEN_H])),
-            back: RefCell::new(Box::new([0u8; SCREEN_W * SCREEN_H])),
+            front: RefCell::new(Box::new([0; SCREEN_W * SCREEN_H])),
+            back: RefCell::new(Box::new([0; SCREEN_W * SCREEN_H])),
             window_y_reached: Cell::new(false),
             window_ly: Cell::new(0),
             bus_controller: bus,
-            is_cgb,
+            cgb,
             raiser,
             listener: Cell::new(Some(listener)),
             frame_count: Cell::new(0),
+            dmg_palette,
         }
     }
 
@@ -248,20 +257,24 @@ impl Ppu {
     /// Re-derives the locks from the current mode. Also called after an LCDC
     /// write, since disabling the LCD frees both buses mid-mode.
     fn apply_bus_locks(&self) {
-        let (oam, video) = {
+        let (oam, video, cram) = {
             let registers = self.registers.borrow();
             if !registers.lcdc().lcd_ppu_enable {
-                (false, false)
+                (false, false, false)
             } else {
                 match registers.stat().ppu_mode {
-                    PpuMode::OamScan => (true, false),
-                    PpuMode::Drawing => (true, true),
-                    PpuMode::HBlank | PpuMode::VBlank => (false, false),
+                    PpuMode::OamScan => (true, false, false),
+                    PpuMode::Drawing => (true, true, true),
+                    PpuMode::HBlank | PpuMode::VBlank => (false, false, false),
                 }
             }
         };
         self.lock(BusType::Oam, oam);
         self.lock(BusType::Video, video);
+        if let Some(cgb) = self.cgb.as_ref() {
+            cgb.set_locked_obj(cram);
+            cgb.set_locked_bg(cram);
+        }
     }
 
     fn lock(&self, bus: BusType, held: bool) {
@@ -282,7 +295,7 @@ impl Ppu {
         ]))
     }
 
-    fn scanline_mut(&self, ly: u8) -> RefMut<'_, [u8]> {
+    fn scanline_mut(&self, ly: u8) -> RefMut<'_, [u16]> {
         let start = ly as usize * SCREEN_W;
         // returns a new RefMut from the passed RefMut mapped with the closure
         // Here it returns a RefMut of a scanline from the back frame buffer
@@ -369,11 +382,18 @@ impl Ppu {
 
             let (tile, bg_attributes) = self.read_tilemap(window, fetcher_x, state.ly);
             timeline.wait(2).await;
-            let fine_y = if window {
+            let mut fine_y = if window {
                 self.window_ly.get() & 7
             } else {
                 state.ly.wrapping_add(self.registers.borrow().scy()) & 7
             };
+            fine_y = bg_attributes.as_ref().map_or(fine_y, |attributes| {
+                if attributes.flip_y() {
+                    7 - fine_y
+                } else {
+                    fine_y
+                }
+            });
             let bank = bg_attributes
                 .as_ref()
                 .map_or(0, |attribute| attribute.bank() as u8);
@@ -425,7 +445,11 @@ impl Ppu {
     async fn fetch_object(&self, req: ObjRequest, state: &LineState, t: &Timeline<Fixed>) {
         // Objects always use 0x8000 addressing, whatever LCDC bit 4 says.
         let addr = (req.tile as u16 * 16 + req.fine_y as u16 * 2) as usize;
-        let bank = if self.is_cgb { req.bank as usize } else { 0 };
+        let bank = if self.cgb.is_some() {
+            req.bank as usize
+        } else {
+            0
+        };
 
         t.wait(2).await; // tile number step, OAM
         let low = self.vram[bank][addr].get();
@@ -444,7 +468,7 @@ impl Ppu {
                 req.priority,
             ),
             clip,
-            self.is_cgb,
+            self.cgb.is_some(),
         );
     }
 
@@ -454,7 +478,9 @@ impl Ppu {
         let idx = (tile_addr - 0x8000) as usize;
         (
             self.vram[0][idx].get(),
-            self.is_cgb.then_some(BgAttributes(self.vram[1][idx].get())),
+            self.cgb
+                .as_ref()
+                .map(|_| BgAttributes(self.vram[1][idx].get())),
         )
     }
 
@@ -484,7 +510,6 @@ impl Ppu {
 
     async fn shifter(&self, objects: &[ScannedObject], state: &LineState, t: Timeline<Fixed>) {
         let obj_size = self.registers.borrow().lcdc().obj_size;
-        let lcdc_obj_enable = self.registers.borrow().lcdc().obj_enable;
         let mut discard = self.registers.borrow().scx() & 7;
 
         let mut pending: u16 = (1 << objects.len()) - 1;
@@ -499,9 +524,10 @@ impl Ppu {
         t.wait(12).await;
 
         while lx < 160 {
+            let should_fetch = self.cgb.is_some() || self.registers.borrow().lcdc().obj_enable;
             // OAM order: at equal X the earlier entry must land first, so the
             // merge rule leaves it on top.
-            let hit = lcdc_obj_enable
+            let hit = should_fetch
                 .then(|| {
                     (0..objects.len()).find(|&i| {
                         is_bit_set!(pending, i)
@@ -511,9 +537,11 @@ impl Ppu {
                 .flatten();
             if let Some(i) = hit {
                 pending &= !(1 << i);
-                state
-                    .obj_request
-                    .set(Some(objects[i].into_request(state.ly, obj_size)));
+                state.obj_request.set(Some(objects[i].into_request(
+                    state.ly,
+                    obj_size,
+                    self.cgb.is_some(),
+                )));
                 while state.obj_request.get().is_some() {
                     t.wait(1).await;
                 }
@@ -566,36 +594,32 @@ impl Ppu {
         }
     }
 
-    fn mix(&self, bg: Pixel, obj: Pixel) -> u8 {
-        let registers = self.registers.borrow();
-        let lcdc = registers.lcdc();
-        let (bg_color, obj_priority) = if self.is_cgb {
-            let priority = if lcdc.bg_window_enable {
-                match bg.bg_priority {
-                    TilePriority::None => obj.bg_priority,
-                    TilePriority::BgWindow => TilePriority::BgWindow,
-                }
-            } else {
-                obj.bg_priority
-            };
-            (bg.color, priority)
-        } else {
-            let bg_color = if lcdc.bg_window_enable { bg.color } else { 0 };
-            (bg_color, obj.bg_priority)
-        };
-        let obj_palette = if obj.palette == 0 {
-            registers.obp0()
-        } else {
-            registers.obp1()
-        };
+    fn mix(&self, bg: Pixel, obj: Pixel) -> u16 {
+        let regs = self.registers.borrow();
+        match &self.cgb {
+            Some(cgb) => cgb.mix(&regs, bg, obj),
+            None => self.dmg_mix(&regs, bg, obj),
+        }
+    }
 
-        let use_obj =
-            obj.color != 0 && (matches!(obj_priority, TilePriority::None) || bg_color == 0);
-        if use_obj {
+    fn dmg_mix(&self, regs: &PpuRegisters, bg: Pixel, obj: Pixel) -> u16 {
+        let lcdc = regs.lcdc();
+        let bg_color = if lcdc.bg_window_enable { bg.color } else { 0 };
+
+        let obj_wins = obj.color != 0
+            && lcdc.obj_enable
+            && (matches!(obj.bg_priority, TilePriority::None) || bg_color == 0);
+        let color_idx = if obj_wins {
+            let obj_palette = if obj.palette == 0 {
+                regs.obp0()
+            } else {
+                regs.obp1()
+            };
             (obj_palette >> (obj.color * 2)) & 3
         } else {
-            (registers.bgp() >> (bg_color * 2)) & 3
-        }
+            (regs.bgp() >> (bg_color * 2)) & 3
+        };
+        self.dmg_palette[color_idx as usize]
     }
 
     fn window_should_start(&self, lx: u8) -> bool {
@@ -632,11 +656,15 @@ impl MemoryHandler for Ppu {
         let registers = self.registers.borrow();
         match address {
             0x8000..=0x9FFF => {
-                let bank = (registers.vram_bank() & 1) as usize;
+                let bank = (self.cgb.as_ref().map_or(0, |cgb| cgb.vbk()) & 1) as usize;
                 let offset = (address - 0x8000) as usize;
                 self.vram[bank][offset].get()
             }
             0xFE00..=0xFE9F => self.oam[(address & 0xFF) as usize].get(),
+            0xFF4F | 0xFF68..=0xFF6B => {
+                self.cgb.as_ref().expect("cgb should be some").read(address)
+            }
+
             _ => registers.read(address),
         }
     }
@@ -644,11 +672,16 @@ impl MemoryHandler for Ppu {
     fn write(&self, address: u16, value: u8, _: MemoryContext<'_>) {
         match address {
             0x8000..=0x9FFF => {
-                let bank = (self.registers.borrow().vram_bank() & 1) as usize;
+                let bank = (self.cgb.as_ref().map_or(0, |cgb| cgb.vbk())) as usize;
                 let offset = (address - 0x8000) as usize;
                 self.vram[bank][offset].set(value);
             }
             0xFE00..=0xFE9F => self.oam[(address & 0xFF) as usize].set(value),
+            0xFF4F | 0xFF68..=0xFF6B => self
+                .cgb
+                .as_ref()
+                .expect("cgb should be some")
+                .write(address, value),
             _ => {
                 self.registers.borrow_mut().write(address, value);
                 // LCDC bit 7 gates every lock; a write can free both buses.
@@ -705,6 +738,7 @@ mod tests {
                 Rc::new(Bus::new()),
                 false,
                 PowerOn::BootRom,
+                [0, 1, 2, 3],
             ));
             time.spawn(|timeline: Timeline<Fixed>| Ppu::task(ppu.clone(), timeline));
             Self {
@@ -822,7 +856,7 @@ mod tests {
         let frame = h.ppu.framebuffer();
         assert_eq!(
             frame[8..16].to_vec(),
-            vec![1u8; 8],
+            vec![1u16; 8],
             "object did not land at screen x 8"
         );
         assert_eq!(
@@ -849,7 +883,7 @@ mod tests {
         h.run_frame();
 
         let frame = h.ppu.framebuffer();
-        let row: Vec<u8> = frame[0..16].to_vec();
+        let row: Vec<u16> = frame[0..16].to_vec();
         assert_eq!(
             row,
             vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],

@@ -1,4 +1,5 @@
 mod attributes;
+mod cgb;
 mod fifo;
 pub mod oam;
 pub mod ppu;

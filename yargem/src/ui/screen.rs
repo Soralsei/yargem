@@ -1,14 +1,7 @@
+use egui::Color32;
 use yargem_lib::{SCREEN_H, SCREEN_W};
 
 use crate::engine::EngineHandle;
-
-// TODO extract palette storage to emulator settings
-const DMG: [egui::Color32; 4] = [
-    egui::Color32::from_rgb(0xE0, 0xF8, 0xD0),
-    egui::Color32::from_rgb(0x88, 0xC0, 0x70),
-    egui::Color32::from_rgb(0x34, 0x68, 0x56),
-    egui::Color32::from_rgb(0x08, 0x18, 0x20),
-];
 
 const SCREEN_SIZE: egui::Vec2 = egui::vec2(SCREEN_W as f32, SCREEN_H as f32);
 
@@ -33,7 +26,13 @@ impl Screen {
                     .frames
                     .output_buffer()
                     .iter()
-                    .map(|pixel| DMG[*pixel as usize])
+                    .map(|pixel| {
+                        let expand = |c: u16| ((c << 3) | (c >> 2)) as u8;
+                        let r = pixel & 0x1F;
+                        let g = pixel >> 5 & 0x1F;
+                        let b = (pixel >> 10) & 0x1F;
+                        Color32::from_rgb(expand(r), expand(g), expand(b))
+                    })
                     .collect::<Vec<egui::Color32>>();
                 let image = egui::ColorImage::new([SCREEN_W, SCREEN_H], pixels);
                 self.game_tex.set(image, egui::TextureOptions::NEAREST);

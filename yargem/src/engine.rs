@@ -58,7 +58,7 @@ pub fn spawn_engine(
 ) -> EngineHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (ev_tx, ev_rx) = mpsc::channel();
-    let (frame_in, frame_out) = triple_buffer::triple_buffer(&[0u8; SCREEN_W * SCREEN_H]);
+    let (frame_in, frame_out) = triple_buffer::triple_buffer(&[0; SCREEN_W * SCREEN_H]);
 
     let thread = thread::Builder::new()
         .name("engine".into())

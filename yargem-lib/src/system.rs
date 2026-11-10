@@ -24,6 +24,12 @@ use super::memory::mmu::Mmu;
 use super::memory::serial::{LogSink, Serial};
 
 const CYCLES_PER_FRAME: Cycles = 70224; // 154 lines * 456 T-cycles
+const DEFAULT_DMG: [u16; 4] = [
+    0x6BFC, // E0 F8 D0  (r 28, g 31, b 26)
+    0x3B11, // 88 C0 70  (r 17, g 24, b 14)
+    0x29A6, // 34 68 56  (r  6, g 13, b 10)
+    0x1061, // 08 18 20  (r  1, g  3, b  4)
+];
 
 /// KEY1 (0xFF4D). Both meaningful bits — current speed and the armed switch —
 /// are clock state, so the handler is a pure view onto `Clock`.
@@ -59,6 +65,7 @@ pub struct Settings {
     pub is_cgb_override: bool,
     pub debugger_attached: bool,
     pub debugger_run_mode: RunMode,
+    pub dmg_palette: [u16; 4],
 }
 
 /// Where execution starts: the boot ROM, or the state it leaves behind.
@@ -74,6 +81,7 @@ impl Default for Settings {
             is_cgb_override: false,
             debugger_attached: false,
             debugger_run_mode: RunMode::Running,
+            dmg_palette: DEFAULT_DMG,
         }
     }
 }
@@ -127,6 +135,7 @@ impl System {
             bus.clone(),
             is_cgb,
             power_on,
+            settings.dmg_palette,
         ));
         let apu = Rc::new(Apu::new(time.fixed.clone(), is_cgb));
 

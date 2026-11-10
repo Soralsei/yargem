@@ -47,5 +47,5 @@
   - [ ] MBC7
 
 - [ ] CGB IO registers beyond KEY1 (`system.rs`).
-- [ ] CGB PPU color handling
+- [ ] CGB PPU color handling and banking
 - [ ] APU VIN mixing (`audio/apu.rs`).

@@ -1,6 +1,6 @@
 use crate::is_bit_set;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[repr(u8)]
 pub enum TilePriority {
     #[default]

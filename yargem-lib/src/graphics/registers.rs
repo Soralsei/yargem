@@ -194,7 +194,6 @@ pub struct PpuRegisters {
     bgp: u8,
     obp0: u8,
     obp1: u8,
-    vram_bank: u8,
 }
 
 impl PpuRegisters {
@@ -224,7 +223,6 @@ impl PpuRegisters {
             0xFF49 => self.obp1,
             0xFF4A => self.wy,
             0xFF4B => self.wx,
-            0xFF4F => self.vram_bank,
             _ => unreachable!("Ppu register at address 0x{:04X} does not exist", address),
         }
     }
@@ -249,7 +247,6 @@ impl PpuRegisters {
             0xFF49 => self.obp1 = value,
             0xFF4A => self.wy = value,
             0xFF4B => self.wx = value,
-            0xFF4F => self.vram_bank = value,
             // the actual OAM transfer is started by the Ppu memory handler
             _ => unreachable!("Ppu register at address 0x{:04X} does not exist", address),
         }
@@ -291,10 +288,6 @@ impl PpuRegisters {
 
     pub fn wy(&self) -> u8 {
         self.wy
-    }
-
-    pub fn vram_bank(&self) -> u8 {
-        self.vram_bank
     }
 
     pub fn bgp(&self) -> u8 {
