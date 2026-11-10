@@ -117,7 +117,7 @@ pub struct Ppu {
     /// The PPU denies the CPU the buses it is using. Arbitration lives here
     /// rather than in the memory handler so that OAM DMA and the PPU's own
     /// fetches, which go through `peek`/`poke`, stay exempt.
-    bus_controller: Rc<Bus>,
+    bus: Rc<Bus>,
 
     cgb: Option<CgbPpu>,
     dmg_palette: [u16; 4],
@@ -149,7 +149,7 @@ impl Ppu {
             back: RefCell::new(Box::new([0; SCREEN_W * SCREEN_H])),
             window_y_reached: Cell::new(false),
             window_ly: Cell::new(0),
-            bus_controller: bus,
+            bus,
             cgb,
             raiser,
             listener: Cell::new(Some(listener)),
@@ -279,8 +279,8 @@ impl Ppu {
 
     fn lock(&self, bus: BusType, held: bool) {
         match held {
-            true => self.bus_controller.seize(bus, BusOwner::Ppu, 0xFF),
-            false => self.bus_controller.release(bus, BusOwner::Ppu),
+            true => self.bus.seize(bus, BusOwner::Ppu, 0xFF),
+            false => self.bus.release(bus, BusOwner::Ppu),
         }
     }
 

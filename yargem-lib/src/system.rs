@@ -143,16 +143,16 @@ impl System {
 
         map.add((0x0000, 0xFFFF), debugger.watch_tap());
 
-        map.add((0x0000, 0x7FFF), bus.clone());
-        map.add((0x8000, 0x9FFF), bus.clone());
-        map.add((0xA000, 0xFDFF), bus.clone());
-        map.add((0xFE00, 0xFE9F), bus.clone());
-
         #[cfg(feature = "blaarg")]
         {
             println!("Added blaarg debug feature");
             map.add((0xA000, 0xBFFF), Rc::new(BlaargSpy));
         }
+
+        map.add((0x0000, 0x7FFF), bus.clone());
+        map.add((0x8000, 0x9FFF), bus.clone());
+        map.add((0xA000, 0xFDFF), bus.clone());
+        map.add((0xFE00, 0xFE9F), bus.clone());
 
         map.add((0x0000, 0x7FFF), boot_rom.clone());
         map.add((0xFF50, 0xFF50), boot_rom.clone());
@@ -178,8 +178,10 @@ impl System {
         map.add((0xFF0F, 0xFF0F), interrupt_controller.clone());
         map.add((0xFF10, 0xFF3F), apu.clone());
         if is_cgb {
-            map.add((0xFF4D, 0xFF4D), Rc::new(SpeedSwitch(time.cpu.clone())));
             // TODO: map other IO registers in the CGB
+            map.add((0xFF4D, 0xFF4D), Rc::new(SpeedSwitch(time.cpu.clone())));
+            map.add((0xFF4F, 0xFF4F), ppu.clone()); // VBK
+            map.add((0xFF68, 0xFF6B), ppu.clone()); // BCPS/BCPD/OCPS/OCPD
         } else {
             let unmapped = Rc::new(Unmapped);
             map.add((0xFF4D, 0xFF4D), unmapped.clone()); // KEY1

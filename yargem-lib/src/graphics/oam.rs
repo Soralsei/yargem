@@ -31,7 +31,7 @@ impl DMAState {
 }
 
 pub struct DMAController {
-    bus_controller: Rc<Bus>,
+    bus: Rc<Bus>,
     state: DMAState,
     raiser: Raiser,
     /// Taken by the task when it starts: it is the only consumer.
@@ -42,7 +42,7 @@ impl DMAController {
     pub fn new(bus: Rc<Bus>) -> Self {
         let (raiser, listener) = signal();
         Self {
-            bus_controller: bus,
+            bus,
             state: DMAState::new(),
             raiser,
             listener: Cell::new(Some(listener)),
@@ -68,20 +68,19 @@ impl DMAController {
                 let value = mmu.read(src_addr, Source::Dma);
 
                 // Idempotent
-                this.bus_controller.seize(BusType::Oam, BusOwner::Dma, 0xFF);
-                this.bus_controller
-                    .seize_bus_of(src_addr, BusOwner::Dma, value);
+                this.bus.seize(BusType::Oam, BusOwner::Dma, 0xFF);
+                this.bus.seize_bus_of(src_addr, BusOwner::Dma, value);
 
                 mmu.write(0xFE00 | offset, value, Source::Dma);
 
                 if this.state.requested.get() {
                     // Restart DMA transfer if transfer enabled in the middle of another transfer
-                    this.bus_controller.release_bus_for(src, BusOwner::Dma);
+                    this.bus.release_bus_for(src, BusOwner::Dma);
                     continue 'outer;
                 }
             }
-            this.bus_controller.release_bus_for(src, BusOwner::Dma);
-            this.bus_controller.release(BusType::Oam, BusOwner::Dma);
+            this.bus.release_bus_for(src, BusOwner::Dma);
+            this.bus.release(BusType::Oam, BusOwner::Dma);
         }
     }
 }

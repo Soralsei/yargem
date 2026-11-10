@@ -1,6 +1,7 @@
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::convert::Infallible;
 use std::future;
+use std::hint::cold_path;
 use std::rc::Rc;
 
 use super::registers::Registers;
@@ -185,6 +186,8 @@ impl CpuTask {
 
         if !self.cpu.halt_bug.take() {
             registers.pc = registers.pc.wrapping_add(1);
+        } else {
+            cold_path();
         }
     }
 

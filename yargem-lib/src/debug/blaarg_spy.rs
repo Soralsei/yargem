@@ -1,9 +1,13 @@
+use std::hint::cold_path;
+
 use crate::memory::mmu::{MemoryContext, MemoryHandler, Source};
+
 pub struct BlaargSpy;
 
 impl MemoryHandler for BlaargSpy {
     fn write(&self, address: u16, value: u8, ctx: MemoryContext<'_>) {
         if address == 0xA000 {
+            cold_path();
             println!("BlaargSpy writing to address 0xA000: {}", value);
             let debug_ctx = ctx.as_source(Source::Debugger);
             let has_signature = debug_ctx.read(0xA001) == 0xDE
