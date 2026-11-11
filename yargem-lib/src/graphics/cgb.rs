@@ -36,6 +36,14 @@ impl CgbPpu {
         }
     }
 
+    pub fn compat(dmg_palette: &[u16; 4]) -> Self {
+        let this = Self::new();
+        this.obj_cram.load(0, dmg_palette);
+        this.obj_cram.load(1, dmg_palette);
+        this.bg_cram.load(0, dmg_palette);
+        this
+    }
+
     pub fn vbk(&self) -> u8 {
         self.vbk.get()
     }
@@ -113,6 +121,14 @@ impl CRam {
             index: Cell::new(PaletteIndex(0)),
             ram: [const { Cell::new(0x00) }; 64],
             locked: Cell::new(false),
+        }
+    }
+
+    fn load(&self, palette: u8, colors: &[u16; 4]) {
+        for (i, color) in colors.iter().enumerate() {
+            let offset = palette as usize * 8 + i * 2;
+            self.ram[offset].set(*color as u8);
+            self.ram[offset + 1].set((*color >> 8) as u8);
         }
     }
 

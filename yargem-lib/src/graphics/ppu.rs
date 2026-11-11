@@ -14,6 +14,7 @@ use crate::memory::bus::{Bus, BusOwner, BusType};
 use crate::memory::mmu::{MemoryContext, MemoryHandler};
 use crate::mode::ConsoleMode;
 use crate::system::PowerOn;
+use crate::util::bit_operations::word_to_bytes;
 use crate::util::future::Race;
 use crate::{is_bit_set, SCREEN_H, SCREEN_W};
 
@@ -141,7 +142,11 @@ impl Ppu {
         dmg_palette: [u16; 4],
     ) -> Self {
         let (raiser, listener) = signal();
-        let cgb = (console_mode != ConsoleMode::Dmg).then(CgbPpu::new);
+        let cgb = match (console_mode, power_on) {
+            (ConsoleMode::Dmg, _) => None,
+            (ConsoleMode::DmgCompat, PowerOn::PostBoot) => Some(CgbPpu::compat(&dmg_palette)),
+            _ => Some(CgbPpu::new()),
+        };
         Self {
             registers: RefCell::new(PpuRegisters::new(power_on)),
             interrupt_request,
