@@ -1,13 +1,10 @@
-use std::{
-    cell::{Cell, RefCell},
-    error::Error,
-    fmt::Display,
-};
+use std::cell::{Cell, RefCell};
 
 use phf::phf_set;
 
 use crate::{
     is_bit_set, memory::mmu::MemoryContext, util::bit_operations::addressing_number_of_bits,
+    SizeMismatch,
 };
 
 use super::mmu::MemoryHandler;
@@ -32,24 +29,6 @@ trait Mapper {
     fn name(&self) -> &'static str;
     fn ram(&mut self) -> &mut [u8] {
         &mut []
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SizeMismatch {
-    pub expected: usize,
-    pub actual: usize,
-}
-
-impl Error for SizeMismatch {}
-
-impl Display for SizeMismatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Size mismatch error (expected {}, got {})",
-            self.expected, self.actual
-        )
     }
 }
 
@@ -99,7 +78,7 @@ impl Mapper for MbcNone {
 
     fn write(&mut self, address: u16, value: u8) {
         match address {
-            0..=0x7FFF => (),
+            0x0000..=0x7FFF => (),
             0xA000..=0xBFFF => {
                 if self.has_ram() {
                     self.ram[address as usize & (RAM_BANK_SIZE - 1)] = value;
@@ -417,8 +396,8 @@ impl Cartridge {
         }
     }
 
-    pub fn is_cgb_only(&self) -> bool {
-        self.cgb_only
+    pub fn cgb_flag(&self) -> bool {
+        self.cgb
     }
 
     pub fn battery_ram(&self) -> Option<Vec<u8>> {
@@ -484,47 +463,5 @@ impl MemoryHandler for Cartridge {
 
     fn bank_at(&self, address: u16) -> Option<u16> {
         self.mbc.borrow().bank_at(address)
-    }
-}
-
-pub struct BootRom {
-    boot_rom: Vec<u8>,
-    boot_rom_enabled: Cell<bool>,
-}
-
-impl BootRom {
-    pub fn new(boot_rom: Option<Vec<u8>>) -> Self {
-        match boot_rom {
-            Some(boot_rom) => Self {
-                boot_rom,
-                boot_rom_enabled: Cell::new(true),
-            },
-            None => Self {
-                boot_rom: Vec::with_capacity(0),
-                boot_rom_enabled: Cell::new(false),
-            },
-        }
-    }
-
-    #[inline]
-    fn covers(&self, address: u16) -> bool {
-        address < 0x100 || (self.boot_rom.len() == 0x900 && (0x200..0x900).contains(&address))
-    }
-}
-
-impl MemoryHandler for BootRom {
-    fn read(&self, address: u16, next: MemoryContext<'_>) -> u8 {
-        if self.boot_rom_enabled.get() && self.covers(address) {
-            return self.boot_rom[address as usize];
-        }
-        next.read(address)
-    }
-
-    fn write(&self, address: u16, value: u8, next: MemoryContext<'_>) {
-        if address == 0xFF50 {
-            self.boot_rom_enabled.set(false);
-            return;
-        }
-        next.write(address, value)
     }
 }

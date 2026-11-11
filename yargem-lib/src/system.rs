@@ -3,18 +3,21 @@ use std::rc::Rc;
 
 use crate::audio::apu::Apu;
 use crate::clock::{CpuClock, Cycles, Time};
+use crate::compat::DmgCompat;
 use crate::debug::debugger::{Debugger, RunMode};
 use crate::debug::protocol::{BankAddr, DebugCommand, DebugEvent, RegisterSnapshot, StopReason};
 use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
 use crate::memory::bus::{Bus, CpuBus};
-use crate::memory::mbc::{Cartridge, SizeMismatch};
+use crate::memory::mbc::Cartridge;
 use crate::memory::mmu::AddressMap;
+use crate::mode::ConsoleMode;
 use crate::timer::Timer;
+use crate::YargemError;
 
-use super::memory::mbc::BootRom;
 use super::memory::mmu::MemoryHandler;
+use crate::memory::boot_rom::BootRom;
 
 use super::cpu::cpu::Cpu;
 use super::cpu::interrupt::InterruptController;
@@ -61,6 +64,7 @@ pub enum RunResult {
     Stopped(StopReason),
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct Settings {
     pub is_cgb_override: bool,
     pub debugger_attached: bool,
@@ -102,18 +106,26 @@ pub struct System {
 }
 
 impl System {
-    pub fn new(boot_rom: Option<Vec<u8>>, rom: Vec<u8>, settings: Settings) -> Self {
+    pub fn new(
+        boot_rom: Option<Vec<u8>>,
+        rom: Vec<u8>,
+        settings: Settings,
+    ) -> Result<Self, YargemError> {
         let mut time = Time::new();
         let debugger = Debugger::new(settings.debugger_attached, settings.debugger_run_mode);
+
+        let cart = Rc::new(Cartridge::new(rom));
+        let console_mode: ConsoleMode = (cart.cgb_flag(), settings.is_cgb_override).into();
+        let is_cgb = console_mode != ConsoleMode::Dmg;
 
         let power_on = match boot_rom {
             Some(_) => PowerOn::BootRom,
             None => PowerOn::PostBoot,
         };
 
-        let boot_rom = Rc::new(BootRom::new(boot_rom));
-        let cart = Rc::new(Cartridge::new(rom));
-        let is_cgb = cart.is_cgb_only() || settings.is_cgb_override;
+        let boot_rom = Rc::new(
+            BootRom::new(boot_rom, is_cgb).map_err(|err| YargemError::BootRomMismatch(err))?,
+        );
 
         let interrupt_controller = Rc::new(InterruptController::new());
         let serial = Rc::new(Serial::new(interrupt_controller.request(), LogSink));
@@ -133,7 +145,7 @@ impl System {
         let ppu = Rc::new(Ppu::new(
             interrupt_controller.request(),
             bus.clone(),
-            is_cgb,
+            console_mode,
             power_on,
             settings.dmg_palette,
         ));
@@ -143,16 +155,16 @@ impl System {
 
         map.add((0x0000, 0xFFFF), debugger.watch_tap());
 
+        map.add((0x0000, 0x7FFF), bus.clone());
+        map.add((0x8000, 0x9FFF), bus.clone());
+        map.add((0xA000, 0xFDFF), bus.clone());
+        map.add((0xFE00, 0xFE9F), bus.clone());
+
         #[cfg(feature = "blaarg")]
         {
             println!("Added blaarg debug feature");
             map.add((0xA000, 0xBFFF), Rc::new(BlaargSpy));
         }
-
-        map.add((0x0000, 0x7FFF), bus.clone());
-        map.add((0x8000, 0x9FFF), bus.clone());
-        map.add((0xA000, 0xFDFF), bus.clone());
-        map.add((0xFE00, 0xFE9F), bus.clone());
 
         map.add((0x0000, 0x7FFF), boot_rom.clone());
         map.add((0xFF50, 0xFF50), boot_rom.clone());
@@ -177,19 +189,32 @@ impl System {
 
         map.add((0xFF0F, 0xFF0F), interrupt_controller.clone());
         map.add((0xFF10, 0xFF3F), apu.clone());
-        if is_cgb {
-            // TODO: map other IO registers in the CGB
-            map.add((0xFF4D, 0xFF4D), Rc::new(SpeedSwitch(time.cpu.clone())));
-            map.add((0xFF4F, 0xFF4F), ppu.clone()); // VBK
-            map.add((0xFF68, 0xFF6B), ppu.clone()); // BCPS/BCPD/OCPS/OCPD
-        } else {
-            let unmapped = Rc::new(Unmapped);
-            map.add((0xFF4D, 0xFF4D), unmapped.clone()); // KEY1
-            map.add((0xFF4F, 0xFF4F), unmapped.clone()); // VBK
-            map.add((0xFF51, 0xFF55), unmapped.clone()); // HDMA1-5
-            map.add((0xFF68, 0xFF6B), unmapped.clone()); // BCPS/BCPD/OCPS/OCPD
-            map.add((0xFF70, 0xFF70), unmapped);
+
+        let compat = Rc::new(DmgCompat::new(power_on));
+        let unmapped = Rc::new(Unmapped);
+        let key1 = Rc::new(SpeedSwitch(time.cpu.clone()));
+
+        let cgb_io: [(u16, u16, Rc<dyn MemoryHandler>); 5] = [
+            (0xFF4D, 0xFF4D, key1),             //KEY1
+            (0xFF4F, 0xFF4F, ppu.clone()),      //VBK
+            (0xFF51, 0xFF55, unmapped.clone()), // TODO HDMA1-5
+            (0xFF68, 0xFF6B, ppu.clone()),      // BCPS/BCPD/OCPS/OCPD
+            (0xFF70, 0xFF70, unmapped.clone()), // TODO WBK
+        ];
+        for (start, end, handler) in cgb_io {
+            if is_cgb {
+                if console_mode == ConsoleMode::DmgCompat {
+                    map.add((start, end), compat.clone());
+                }
+                map.add((start, end), handler);
+            } else {
+                map.add((start, end), unmapped.clone());
+            }
         }
+        if console_mode == ConsoleMode::DmgCompat {
+            map.add((0xFF50, 0xFF50), compat);
+        }
+
         map.add((0xFFFF, 0xFFFF), interrupt_controller.clone());
         let mmu = Rc::new(Mmu::new(map));
 
@@ -215,7 +240,7 @@ impl System {
             )
         });
 
-        Self {
+        Ok(Self {
             cpu,
             mmu,
             debugger,
@@ -226,7 +251,7 @@ impl System {
             time,
             joypad,
             last_frame: 0,
-        }
+        })
     }
 
     pub fn run_frame(&mut self) -> RunResult {
@@ -322,8 +347,10 @@ impl System {
         self.cart.battery_ram()
     }
 
-    pub fn load_battery_ram(&self, data: &[u8]) -> Result<(), SizeMismatch> {
-        self.cart.load_battery_ram(data)
+    pub fn load_battery_ram(&self, data: &[u8]) -> Result<(), YargemError> {
+        self.cart
+            .load_battery_ram(data)
+            .map_err(|err| YargemError::SaveMismatch(err))
     }
 
     pub fn take_ram_dirty(&self) -> bool {

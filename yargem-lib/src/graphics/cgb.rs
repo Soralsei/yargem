@@ -23,21 +23,21 @@ impl PaletteIndex {
 
 pub struct CgbPpu {
     vbk: Cell<u8>,
-    obj_palette: CRam,
-    bg_palette: CRam,
+    obj_cram: CRam,
+    bg_cram: CRam,
 }
 
 impl CgbPpu {
     pub fn new() -> Self {
         Self {
             vbk: Cell::new(0),
-            obj_palette: CRam::obj_new(),
-            bg_palette: CRam::bg_new(),
+            obj_cram: CRam::obj_new(),
+            bg_cram: CRam::bg_new(),
         }
     }
 
     pub fn vbk(&self) -> u8 {
-        self.vbk.get() & 1
+        self.vbk.get()
     }
 
     pub fn mix(&self, regs: &PpuRegisters, bg: Pixel, obj: Pixel) -> u16 {
@@ -48,40 +48,48 @@ impl CgbPpu {
                 || !lcdc.bg_window_enable
                 || (bg.bg_priority == TilePriority::None && obj.bg_priority == TilePriority::None));
         if obj_wins {
-            self.obj_palette.get(obj.palette, obj.color)
+            self.obj_cram.get(obj.palette, obj.color)
         } else {
-            self.bg_palette.get(bg.palette, bg.color)
+            self.bg_cram.get(bg.palette, bg.color)
         }
     }
 
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             0xFF4F => 0xFE | self.vbk.get(),
-            0xFF68 => self.bg_palette.index(),
-            0xFF69 => self.bg_palette.read(),
-            0xFF6A => self.obj_palette.index(),
-            0xFF6B => self.obj_palette.read(),
+            0xFF68 => self.bg_cram.index(),
+            0xFF69 => self.bg_cram.read(),
+            0xFF6A => self.obj_cram.index(),
+            0xFF6B => self.obj_cram.read(),
             _ => unreachable!("invalid read in CgbPpu at 0x{addr:04X}"),
         }
     }
 
     pub fn write(&self, addr: u16, value: u8) {
         match addr {
-            0xFF4F => self.vbk.set(value),
-            0xFF68 => self.bg_palette.write_index(value),
-            0xFF69 => self.bg_palette.write(value),
-            0xFF6A => self.obj_palette.write_index(value),
-            0xFF6B => self.obj_palette.write(value),
+            0xFF4F => self.vbk.set(value & 1),
+            0xFF68 => self.bg_cram.write_index(value),
+            0xFF69 => self.bg_cram.write(value),
+            0xFF6A => self.obj_cram.write_index(value),
+            0xFF6B => self.obj_cram.write(value),
             _ => unreachable!("invalid write in CgbPpu at 0x{addr:04X}"),
         }
     }
 
     pub fn set_locked_obj(&self, locked: bool) {
-        self.obj_palette.set_lock(locked);
+        self.obj_cram.set_lock(locked);
     }
 
     pub fn set_locked_bg(&self, locked: bool) {
-        self.bg_palette.set_lock(locked);
+        self.bg_cram.set_lock(locked);
+    }
+
+    pub fn bg_cram(&self) -> &CRam {
+        &self.bg_cram
+    }
+
+    pub fn obj_cram(&self) -> &CRam {
+        &self.obj_cram
     }
 }
 
@@ -92,7 +100,7 @@ pub struct CRam {
 }
 
 impl CRam {
-    pub fn bg_new() -> Self {
+    fn bg_new() -> Self {
         Self {
             index: Cell::new(PaletteIndex(0)),
             ram: [const { Cell::new(0xFF) }; 64],
@@ -113,7 +121,7 @@ impl CRam {
     }
 
     pub fn index(&self) -> u8 {
-        self.index.get().0
+        self.index.get().0 | 0x40
     }
 
     pub fn write_index(&self, value: u8) {
@@ -135,7 +143,7 @@ impl CRam {
         if self.locked.get() {
             return 0xFF;
         }
-        self.ram[(self.index.get().addr()) as usize].get() | 0x40
+        self.ram[(self.index.get().addr()) as usize].get()
     }
 
     pub fn get(&self, palette: u8, color: u8) -> u16 {

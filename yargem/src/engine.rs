@@ -23,9 +23,14 @@ pub enum EngineCommand {
     AudioSink(Option<AudioSink>),
 }
 
+pub enum EngineEvent {
+    Debug(DebugEvent),
+    Error(anyhow::Error),
+}
+
 pub struct EngineHandle {
     commands: Option<mpsc::Sender<EngineCommand>>,
-    pub events: mpsc::Receiver<DebugEvent>,
+    pub events: mpsc::Receiver<EngineEvent>,
     pub frames: triple_buffer::Output<Frame>,
     thread: Option<JoinHandle<()>>,
 }
@@ -63,9 +68,20 @@ pub fn spawn_engine(
     let thread = thread::Builder::new()
         .name("engine".into())
         .spawn(move || {
+            let boot_copy = boot.clone();
+            let sys = match System::new(boot_copy, rom.clone(), settings) {
+                Ok(s) => s,
+                Err(err) => {
+                    let _ = ev_tx.send(EngineEvent::Error(
+                        anyhow::Error::new(err).context("Failed to load boot rom"),
+                    ));
+                    System::new(None, rom, settings)
+                        .expect("System::new cannot fail without boot rom")
+                }
+            };
             let engine = Engine {
                 // built inside the thread: the Rcs never cross
-                sys: System::new(boot, rom, settings),
+                sys,
                 commands: cmd_rx,
                 events: ev_tx,
                 frames: frame_in,
@@ -89,7 +105,7 @@ struct Engine {
     sys: System,
 
     commands: mpsc::Receiver<EngineCommand>,
-    events: mpsc::Sender<DebugEvent>,
+    events: mpsc::Sender<EngineEvent>,
     frames: triple_buffer::Input<Frame>,
 
     audio: Option<AudioSink>,
@@ -104,12 +120,18 @@ impl Engine {
         match fs::read(&self.save_path) {
             Ok(save_data) => match self.sys.load_battery_ram(&save_data) {
                 Ok(_) => {}
-                Err(e) => eprintln!("Failed to load save file: {e}"),
+                Err(e) => {
+                    let _ = self.events.send(EngineEvent::Error(
+                        anyhow::Error::new(e).context("Failed to load save file"),
+                    ));
+                }
             },
-            Err(e) if !matches!(e.kind(), io::ErrorKind::NotFound) => eprintln!("{e}"),
-            Err(e) => {
-                eprintln!("{e}")
+            Err(e) if !matches!(e.kind(), io::ErrorKind::NotFound) => {
+                let _ = self.events.send(EngineEvent::Error(
+                    anyhow::Error::new(e).context("Failed to load save file"),
+                ));
             }
+            Err(_) => {}
         }
         while self.drain() {
             // TODO periodically call save_ram if take_ram_dirty
@@ -128,7 +150,9 @@ impl Engine {
                     // partial frame, drawn up to the current LY
                     self.frames.write(*self.sys.get_framebuffer());
                     let regs = self.sys.registers();
-                    let _ = self.events.send(DebugEvent::Paused { reason, regs });
+                    let _ = self
+                        .events
+                        .send(EngineEvent::Debug(DebugEvent::Paused { reason, regs }));
                 }
             }
             (self.request_repaint)();
@@ -176,7 +200,7 @@ impl Engine {
             EngineCommand::Button(button, down) => self.sys.set_button(button, down),
             EngineCommand::Debug(cmd) => {
                 if let Some(event) = self.sys.debug(cmd) {
-                    let _ = self.events.send(event);
+                    let _ = self.events.send(EngineEvent::Debug(event));
                 }
             }
             EngineCommand::AudioSink(sink) => self.audio = sink,

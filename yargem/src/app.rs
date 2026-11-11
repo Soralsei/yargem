@@ -13,7 +13,7 @@ use yargem_lib::{
 
 use crate::{
     audio::manager::AudioManager,
-    engine::{spawn_engine, EngineCommand, EngineHandle},
+    engine::{spawn_engine, EngineCommand, EngineEvent, EngineHandle},
     ui::{
         debug::{controls_bar, DebugPanel},
         style, Screen,
@@ -183,60 +183,67 @@ impl App {
             }
         });
     }
+
+    fn handle_dbg(&mut self, dbg: DebugEvent) {
+        match dbg {
+            DebugEvent::Paused { reason, regs } => {
+                if let Some(state) = &mut self.debug_state {
+                    state.paused = true;
+                    state.last_regs = Some(regs);
+                    state.last_stop = Some(reason);
+                }
+            }
+            DebugEvent::Resumed => {
+                if let Some(state) = &mut self.debug_state {
+                    state.paused = false;
+                }
+            }
+            DebugEvent::Memory { start, bytes } => {}
+            DebugEvent::Registers(register_snapshot) => {
+                if let Some(state) = &mut self.debug_state {
+                    state.last_regs = Some(register_snapshot);
+                }
+            }
+            DebugEvent::Attached {
+                regs,
+                breaks,
+                watches,
+            } => {
+                match &mut self.debug_state {
+                    Some(state) => {
+                        state.last_regs = Some(regs);
+                        state.breakpoints = breaks;
+                        state.watchpoints = watches;
+                    }
+                    None => self.debug_state = Some(DebugState::new(regs, breaks, watches)),
+                }
+                self.debug_panel.open = true;
+            }
+            DebugEvent::Detached => {
+                self.debug_state = None;
+                self.debug_panel.open = false;
+            }
+            DebugEvent::Watchpoints(watches) => {
+                if let Some(state) = &mut self.debug_state {
+                    state.watchpoints = watches;
+                }
+            }
+            DebugEvent::Breakpoints(breakpoints) => {
+                if let Some(state) = &mut self.debug_state {
+                    state.breakpoints = breakpoints;
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let Some(engine) = &self.engine else { return };
-        while let Ok(ev) = engine.events.try_recv() {
+        while let Some(ev) = self.engine.as_ref().and_then(|e| e.events.try_recv().ok()) {
             match ev {
-                DebugEvent::Paused { reason, regs } => {
-                    if let Some(state) = &mut self.debug_state {
-                        state.paused = true;
-                        state.last_regs = Some(regs);
-                        state.last_stop = Some(reason);
-                    }
-                }
-                DebugEvent::Resumed => {
-                    if let Some(state) = &mut self.debug_state {
-                        state.paused = false;
-                    }
-                }
-                DebugEvent::Memory { start, bytes } => {}
-                DebugEvent::Registers(register_snapshot) => {
-                    if let Some(state) = &mut self.debug_state {
-                        state.last_regs = Some(register_snapshot);
-                    }
-                }
-                DebugEvent::Attached {
-                    regs,
-                    breaks,
-                    watches,
-                } => {
-                    match &mut self.debug_state {
-                        Some(state) => {
-                            state.last_regs = Some(regs);
-                            state.breakpoints = breaks;
-                            state.watchpoints = watches;
-                        }
-                        None => self.debug_state = Some(DebugState::new(regs, breaks, watches)),
-                    }
-                    self.debug_panel.open = true;
-                }
-                DebugEvent::Detached => {
-                    self.debug_state = None;
-                    self.debug_panel.open = false;
-                }
-                DebugEvent::Watchpoints(watches) => {
-                    if let Some(state) = &mut self.debug_state {
-                        state.watchpoints = watches;
-                    }
-                }
-                DebugEvent::Breakpoints(breakpoints) => {
-                    if let Some(state) = &mut self.debug_state {
-                        state.breakpoints = breakpoints;
-                    }
-                }
+                EngineEvent::Debug(dbg) => self.handle_dbg(dbg),
+                // TODO: display errors in a banner at some point
+                EngineEvent::Error(err) => eprintln!("engine error: {err:#}"),
             }
         }
     }

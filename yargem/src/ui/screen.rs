@@ -29,7 +29,7 @@ impl Screen {
                     .map(|pixel| {
                         let expand = |c: u16| ((c << 3) | (c >> 2)) as u8;
                         let r = pixel & 0x1F;
-                        let g = pixel >> 5 & 0x1F;
+                        let g = (pixel >> 5) & 0x1F;
                         let b = (pixel >> 10) & 0x1F;
                         Color32::from_rgb(expand(r), expand(g), expand(b))
                     })

@@ -112,6 +112,7 @@ impl MemoryHandler for WatchTap {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum RunMode {
     Running,
     Paused,
@@ -327,7 +328,7 @@ mod test {
             };
             let rom = fs::read(rom_path)?;
             Ok(Self {
-                system: System::new(None, rom, settings),
+                system: System::new(None, rom, settings).expect("system init cannot fail in tests"),
             })
         }
 

@@ -74,3 +74,8 @@ The executor change is checked against the baseline, and HDMA needs the executor
   - [ ] Map FF51–55 to `Hdma` in CGB mode in `system.rs` and spawn its task.
   - [ ] Edge cases, can wait: no block for an HBlank while the CPU is halted (needs a read of `Cpu::halted()`); waking from HALT in mode 0, when HALT was entered outside mode 0, copies one block; turning the LCD off with a transfer armed copies one block.
   - [ ] rgbasm tests, with the expected values taken from running the same ROM in SameBoy: FF55 reads after a GDMA, after an HBlank transfer completes, and after a cancel; GDMA length measured with DIV in both speeds; HBlank blocks per frame, by watching FF55 count down across LY.
+
+## Misc
+
+- [ ] add log crate and rework logging in engine
+- [ ] add logging implementation for the log crate to the frontend

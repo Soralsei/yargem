@@ -12,6 +12,7 @@ use crate::graphics::fifo::{BgFIFO, ObjFIFO, Pixel};
 use crate::graphics::registers::{ObjSize, PpuMode, PpuRegisters, TileAddressing, TileArea};
 use crate::memory::bus::{Bus, BusOwner, BusType};
 use crate::memory::mmu::{MemoryContext, MemoryHandler};
+use crate::mode::ConsoleMode;
 use crate::system::PowerOn;
 use crate::util::future::Race;
 use crate::{is_bit_set, SCREEN_H, SCREEN_W};
@@ -119,6 +120,7 @@ pub struct Ppu {
     /// fetches, which go through `peek`/`poke`, stay exempt.
     bus: Rc<Bus>,
 
+    console_mode: ConsoleMode,
     cgb: Option<CgbPpu>,
     dmg_palette: [u16; 4],
 
@@ -134,12 +136,12 @@ impl Ppu {
     pub fn new(
         interrupt_request: InterruptRequest,
         bus: Rc<Bus>,
-        is_cgb: bool,
+        console_mode: ConsoleMode,
         power_on: PowerOn,
         dmg_palette: [u16; 4],
     ) -> Self {
         let (raiser, listener) = signal();
-        let cgb = is_cgb.then_some(CgbPpu::new());
+        let cgb = (console_mode != ConsoleMode::Dmg).then(CgbPpu::new);
         Self {
             registers: RefCell::new(PpuRegisters::new(power_on)),
             interrupt_request,
@@ -150,6 +152,7 @@ impl Ppu {
             window_y_reached: Cell::new(false),
             window_ly: Cell::new(0),
             bus,
+            console_mode,
             cgb,
             raiser,
             listener: Cell::new(Some(listener)),
@@ -445,7 +448,7 @@ impl Ppu {
     async fn fetch_object(&self, req: ObjRequest, state: &LineState, t: &Timeline<Fixed>) {
         // Objects always use 0x8000 addressing, whatever LCDC bit 4 says.
         let addr = (req.tile as u16 * 16 + req.fine_y as u16 * 2) as usize;
-        let bank = if self.cgb.is_some() {
+        let bank = if self.console_mode == ConsoleMode::Cgb {
             req.bank as usize
         } else {
             0
@@ -468,7 +471,7 @@ impl Ppu {
                 req.priority,
             ),
             clip,
-            self.cgb.is_some(),
+            self.console_mode == ConsoleMode::Cgb,
         );
     }
 
@@ -478,9 +481,7 @@ impl Ppu {
         let idx = (tile_addr - 0x8000) as usize;
         (
             self.vram[0][idx].get(),
-            self.cgb
-                .as_ref()
-                .map(|_| BgAttributes(self.vram[1][idx].get())),
+            (self.console_mode == ConsoleMode::Cgb).then(|| BgAttributes(self.vram[1][idx].get())),
         )
     }
 
@@ -524,7 +525,8 @@ impl Ppu {
         t.wait(12).await;
 
         while lx < 160 {
-            let should_fetch = self.cgb.is_some() || self.registers.borrow().lcdc().obj_enable;
+            let should_fetch =
+                self.console_mode != ConsoleMode::Dmg || self.registers.borrow().lcdc().obj_enable;
             // OAM order: at equal X the earlier entry must land first, so the
             // merge rule leaves it on top.
             let hit = should_fetch
@@ -540,7 +542,7 @@ impl Ppu {
                 state.obj_request.set(Some(objects[i].into_request(
                     state.ly,
                     obj_size,
-                    self.cgb.is_some(),
+                    self.console_mode == ConsoleMode::Cgb,
                 )));
                 while state.obj_request.get().is_some() {
                     t.wait(1).await;
@@ -596,9 +598,9 @@ impl Ppu {
 
     fn mix(&self, bg: Pixel, obj: Pixel) -> u16 {
         let regs = self.registers.borrow();
-        match &self.cgb {
-            Some(cgb) => cgb.mix(&regs, bg, obj),
-            None => self.dmg_mix(&regs, bg, obj),
+        match (&self.cgb, self.console_mode) {
+            (Some(cgb), ConsoleMode::Cgb) => cgb.mix(&regs, bg, obj),
+            _ => self.dmg_mix(&regs, bg, obj),
         }
     }
 
@@ -608,8 +610,9 @@ impl Ppu {
 
         let obj_wins = obj.color != 0
             && lcdc.obj_enable
-            && (matches!(obj.bg_priority, TilePriority::None) || bg_color == 0);
-        let color_idx = if obj_wins {
+            && (obj.bg_priority == TilePriority::None || bg_color == 0);
+
+        let shade = if obj_wins {
             let obj_palette = if obj.palette == 0 {
                 regs.obp0()
             } else {
@@ -619,7 +622,12 @@ impl Ppu {
         } else {
             (regs.bgp() >> (bg_color * 2)) & 3
         };
-        self.dmg_palette[color_idx as usize]
+
+        match &self.cgb {
+            Some(cgb) if obj_wins => cgb.obj_cram().get(obj.palette, shade),
+            Some(cgb) => cgb.bg_cram().get(0, shade),
+            None => self.dmg_palette[shade as usize],
+        }
     }
 
     fn window_should_start(&self, lx: u8) -> bool {
@@ -656,14 +664,12 @@ impl MemoryHandler for Ppu {
         let registers = self.registers.borrow();
         match address {
             0x8000..=0x9FFF => {
-                let bank = (self.cgb.as_ref().map_or(0, |cgb| cgb.vbk()) & 1) as usize;
+                let bank = (self.cgb.as_ref().map_or(0, |cgb| cgb.vbk())) as usize;
                 let offset = (address - 0x8000) as usize;
                 self.vram[bank][offset].get()
             }
             0xFE00..=0xFE9F => self.oam[(address & 0xFF) as usize].get(),
-            0xFF4F | 0xFF68..=0xFF6B => {
-                self.cgb.as_ref().expect("cgb should be some").read(address)
-            }
+            0xFF4F | 0xFF68..=0xFF6B => self.cgb.as_ref().map_or(0xFF, |cgb| cgb.read(address)),
 
             _ => registers.read(address),
         }
@@ -677,11 +683,11 @@ impl MemoryHandler for Ppu {
                 self.vram[bank][offset].set(value);
             }
             0xFE00..=0xFE9F => self.oam[(address & 0xFF) as usize].set(value),
-            0xFF4F | 0xFF68..=0xFF6B => self
-                .cgb
-                .as_ref()
-                .expect("cgb should be some")
-                .write(address, value),
+            0xFF4F | 0xFF68..=0xFF6B => {
+                if let Some(cgb) = &self.cgb {
+                    cgb.write(address, value);
+                }
+            }
             _ => {
                 self.registers.borrow_mut().write(address, value);
                 // LCDC bit 7 gates every lock; a write can free both buses.
@@ -736,7 +742,7 @@ mod tests {
             let ppu = Rc::new(Ppu::new(
                 interrupts.request(),
                 Rc::new(Bus::new()),
-                false,
+                ConsoleMode::Dmg,
                 PowerOn::BootRom,
                 [0, 1, 2, 3],
             ));
