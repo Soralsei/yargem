@@ -13,3 +13,6 @@ yargem-common = { path = "../yargem-common" }
 serde = { version = "1.0.229", features = ["derive"] }
 slab = "0.4.12"
 phf = { version = "0.14.0", features = ["macros"] }
+
+[dev-dependencies]
+fasthash = "0.4.0"

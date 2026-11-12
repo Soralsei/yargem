@@ -6,3 +6,4 @@ backlog*.txt
 
 tests/*.o
 tests/*.gb
+yargem-lib/tests/fixtures/*.txt
