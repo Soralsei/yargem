@@ -1,11 +1,11 @@
-use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::cell::Cell;
 use std::convert::Infallible;
 use std::future;
 use std::hint::cold_path;
 use std::rc::Rc;
 
 use super::registers::Registers;
-use crate::clock::{self, CpuClock, FixedClock, Listener, Timeline, M_CYCLE};
+use crate::clock::{self, CpuClock, CpuTime, Fixed, FixedClock, Listener, Timeline, M_CYCLE};
 use crate::cpu::instructions::{execute_prefixed, execute_unprefixed};
 use crate::cpu::interrupt::InterruptController;
 use crate::cpu::registers::{Flags, Reg16, Reg8};
@@ -14,7 +14,7 @@ use crate::system::PowerOn;
 use crate::util::bit_operations::*;
 use yargem_common::Condition;
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Ime {
     #[default]
     Disabled,
@@ -22,115 +22,136 @@ pub enum Ime {
     Enabled,
 }
 
-pub struct Cpu {
-    pub registers: RefCell<Registers>,
+#[derive(Debug)]
+struct CpuState {
+    registers: Cell<Registers>,
+    ime: Cell<Ime>,
     boundary: Cell<Option<u16>>,
     halted: Cell<bool>,
-    halt_bug: Cell<bool>,
-    ime: Cell<Ime>,
 
     // Happens on CPU panic (unknown opcode decode wedges the cpu and stops fetches)
     wedged: Cell<bool>,
 }
 
-impl Cpu {
-    pub fn new(is_cgb: bool, power_on: PowerOn) -> Cpu {
+impl CpuState {
+    fn new(power_on: PowerOn, is_cgb: bool) -> Self {
         let registers = match power_on {
             PowerOn::BootRom => Registers::default(),
             PowerOn::PostBoot => Registers::new(is_cgb),
         };
-        Cpu {
-            registers: RefCell::new(registers),
+        CpuState {
+            registers: Cell::new(registers),
             ime: Cell::new(Ime::Disabled),
             boundary: Cell::new(None),
             halted: Cell::new(false),
-            halt_bug: Cell::new(false),
             wedged: Cell::new(false),
         }
     }
+}
 
-    pub async fn task(
-        cpu: Rc<Cpu>,
-        bus: CpuBus,
-        irq: Rc<InterruptController>,
-        t: Timeline<clock::Cpu>,
-        t_fixed: Timeline<clock::Fixed>,
-        clock: Rc<CpuClock>,
-        fixed_clock: Rc<FixedClock>,
-    ) -> Infallible {
-        let mut task = CpuTask {
-            t,
-            t_fixed,
-            irq_listener: irq.take_listener(),
-            cpu,
-            bus,
-            irq,
-            clock,
-            fixed_clock,
-        };
-        loop {
-            task.step().await
-        }
+#[derive(Debug, Clone)]
+pub struct CpuView(Rc<CpuState>);
+
+impl CpuView {
+    pub fn registers(&self) -> Registers {
+        self.0.registers.get()
     }
 
     pub fn take_boundary(&self) -> Option<u16> {
-        self.boundary.take()
-    }
-
-    pub fn halt(&self) {
-        self.halted.set(true);
+        self.0.boundary.take()
     }
 
     pub fn halted(&self) -> bool {
-        self.halted.get()
-    }
-
-    pub fn set_ime(&self, active: Ime) {
-        self.ime.set(active);
+        self.0.halted.get()
     }
 
     pub fn wedged(&self) -> bool {
-        self.wedged.get()
-    }
-
-    pub fn pc(&self) -> u16 {
-        self.registers.borrow().pc
+        self.0.wedged.get()
     }
 }
 
-pub struct CpuTask {
-    cpu: Rc<Cpu>,
+pub struct Cpu {
     bus: CpuBus,
     irq: Rc<InterruptController>,
     irq_listener: Listener,
+
+    state: Rc<CpuState>,
+
     clock: Rc<CpuClock>,
     fixed_clock: Rc<FixedClock>,
-    t: Timeline<clock::Cpu>,
-    t_fixed: Timeline<clock::Fixed>,
+
+    halt_bug: bool,
 }
 
-impl CpuTask {
+impl Cpu {
+    pub fn new(
+        bus: CpuBus,
+        irq: Rc<InterruptController>,
+        clock: Rc<CpuClock>,
+        fixed_clock: Rc<FixedClock>,
+        is_cgb: bool,
+        power_on: PowerOn,
+    ) -> Cpu {
+        let listener = irq.take_listener();
+        Self {
+            bus,
+            irq,
+            irq_listener: listener,
+            state: Rc::new(CpuState::new(power_on, is_cgb)),
+            clock,
+            fixed_clock,
+            halt_bug: false,
+        }
+    }
+
+    pub fn view(&self) -> CpuView {
+        CpuView(self.state.clone())
+    }
+
+    pub async fn run(
+        mut self,
+        t: Timeline<clock::Cpu>,
+        t_fixed: Timeline<clock::Fixed>,
+    ) -> Infallible {
+        loop {
+            self.step().await
+        }
+    }
+
+    pub fn halt(&self) {
+        self.state.halted.set(true);
+    }
+
+    pub fn set_ime(&self, active: Ime) {
+        self.state.ime.set(active);
+    }
+
+    pub fn wedged(&self) -> bool {
+        self.state.wedged.get()
+    }
+
     pub async fn step(&mut self) {
-        if self.cpu.halted.get() {
-            if self.cpu.ime.get() == Ime::Disabled && self.irq.peek().is_some() {
+        if self.state.halted.get() {
+            if self.state.ime.get() == Ime::Disabled && self.irq.peek().is_some() {
                 // halt bug: PC fails to increment, next byte executes twice
-                self.cpu.halt_bug.set(true);
+                self.halt_bug = true;
             } else {
-                self.t
+                self.time
+                    .t
                     .after(self.irq_listener.until(|| self.irq.peek().is_some()))
                     .await;
             }
-            self.cpu.halted.set(false);
+            self.state.halted.set(false);
         }
 
-        if self.cpu.ime.get() == Ime::Enabled {
+        if self.state.ime.get() == Ime::Enabled {
             if let Some(vector) = self.irq.consume() {
                 self.service(vector).await;
             }
         }
 
-        if self.cpu.ime.get() == Ime::Pending {
-            self.cpu.ime.set(Ime::Enabled);
+        if self.state.ime.get() == Ime::Pending {
+            self.state.ime.set(Ime::Enabled);
         }
 
         self.execute().await;
@@ -138,14 +159,14 @@ impl CpuTask {
 
     async fn execute(&mut self) {
         // Set current pc boundary before fetch
-        self.cpu.boundary.set(Some(self.registers().pc));
+        self.state.boundary.set(Some(self.state.registers.get().pc));
 
         self.fetch(Reg8::Z).await;
-        let opcode = self.registers().z;
+        let opcode = self.state.registers.get().z;
         match opcode {
             0xCB => {
                 self.fetch(Reg8::Z).await;
-                let opcode = self.registers().z;
+                let opcode = self.state.registers.get().z;
                 execute_prefixed(self, opcode).await;
             }
             _ => execute_unprefixed(self, opcode).await,
@@ -156,55 +177,59 @@ impl CpuTask {
         self.idle().await;
         self.idle().await;
 
-        let pc = self.registers().pc;
+        let pc = self.state.registers.get().pc;
         let (msb, lsb) = word_to_bytes(pc);
 
         self.push(msb).await;
         self.push(lsb).await;
 
-        self.cpu.ime.set(Ime::Disabled);
+        self.state.ime.set(Ime::Disabled);
 
-        self.registers_mut().pc = vector as u16;
+        self.state.registers.update(|mut regs| {
+            regs.pc = vector as u16;
+            regs
+        });
 
         self.idle().await;
     }
 
-    fn registers_mut(&self) -> RefMut<'_, Registers> {
-        self.cpu.registers.borrow_mut()
-    }
-
-    pub fn registers(&self) -> Ref<'_, Registers> {
-        self.cpu.registers.borrow()
-    }
-
-    pub async fn fetch(&self, dst: Reg8) {
+    pub async fn fetch(&mut self, dst: Reg8) {
         self.t.wait(M_CYCLE).await;
 
-        let mut registers = self.registers_mut();
+        let mut registers = self.state.registers.get();
         let pc = registers.pc;
         registers.write_u8(dst, self.bus.read(pc));
 
-        if !self.cpu.halt_bug.take() {
+        let halt_bug = self.halt_bug;
+        self.halt_bug = false;
+
+        if !halt_bug {
             registers.pc = registers.pc.wrapping_add(1);
         } else {
             cold_path();
         }
+
+        self.state.registers.set(registers);
     }
 
     pub async fn load(&self, dst: Reg8, addr: u16) {
         self.t.wait(M_CYCLE).await;
 
-        self.registers_mut().write_u8(dst, self.bus.read(addr));
+        self.state.registers.update(|mut regs| {
+            regs.write_u8(dst, self.bus.read(addr));
+            regs
+        });
     }
 
     pub async fn store(&self, address: u16, src: Reg8) {
         self.t.wait(M_CYCLE).await;
 
-        self.bus.write(address, self.registers().read_u8(src));
+        self.bus
+            .write(address, self.state.registers.get().read_u8(src));
     }
 
     pub async fn store16(&self, addr: u16, src: Reg16) {
-        let (msb, lsb) = word_to_bytes(self.registers().read_u16(src));
+        let (msb, lsb) = word_to_bytes(self.state.registers.get().read_u16(src));
 
         self.t.wait(M_CYCLE).await;
         self.bus.write(addr, lsb);
@@ -214,7 +239,7 @@ impl CpuTask {
     }
 
     pub fn cond(&self, cond: Condition) -> bool {
-        let flags = &self.registers().f;
+        let flags = &self.state.registers.get().f;
         match cond {
             Condition::Unconditional => true,
             Condition::NotZero => !flags.zero,
@@ -225,24 +250,30 @@ impl CpuTask {
     }
 
     pub fn high(&self, reg: Reg8) -> u16 {
-        0xFF00 | self.registers().read_u8(reg) as u16
+        0xFF00 | self.state.registers.get().read_u8(reg) as u16
     }
 
     pub fn rel(&self, reg: Reg8) -> u16 {
-        let pc = self.registers().pc;
-        pc.wrapping_add_signed(self.registers().read_u8(reg) as i8 as i16)
+        let pc = self.state.registers.get().pc;
+        pc.wrapping_add_signed(self.state.registers.get().read_u8(reg) as i8 as i16)
     }
 
     pub fn jump(&self, addr: u16) {
-        self.registers_mut().pc = addr;
+        self.state.registers.update(|mut regs| {
+            regs.pc = addr;
+            regs
+        });
     }
 
     pub async fn push(&self, value: u8) {
         self.t.wait(M_CYCLE).await;
 
-        let mut registers = self.registers_mut();
-        let new_sp = registers.sp.wrapping_sub(1);
-        registers.sp = new_sp;
+        let mut regs = self.state.registers.get();
+
+        let new_sp = regs.sp.wrapping_sub(1);
+        regs.sp = new_sp;
+
+        self.state.registers.set(regs);
 
         self.bus.write(new_sp, value);
     }
@@ -250,11 +281,14 @@ impl CpuTask {
     pub async fn pop(&self) -> u8 {
         self.t.wait(M_CYCLE).await;
 
-        let mut registers = self.registers_mut();
-        let sp = registers.sp;
-        registers.sp = sp.wrapping_add(1);
+        let mut regs = self.state.registers.get();
 
-        self.bus.read(sp)
+        let new_sp = regs.sp.wrapping_add(1);
+        regs.sp = new_sp;
+
+        self.state.registers.set(regs);
+
+        self.bus.read(new_sp)
     }
 
     pub async fn push16(&self, value: u16) {
@@ -270,28 +304,38 @@ impl CpuTask {
     }
 
     pub fn addr(&self, src: Reg16) -> u16 {
-        self.registers().read_u16(src)
+        self.state.registers.get().read_u16(src)
     }
 
     pub fn alu(&self, register: Reg8, op: impl FnOnce(&mut Flags, u8) -> u8) {
-        let mut registers = self.registers_mut();
-        let value = registers.read_u8(register);
-        let result = op(&mut registers.f, value);
-        registers.write_u8(register, result);
+        self.state.registers.update(|mut regs| {
+            let value = regs.read_u8(register);
+            let result = op(&mut regs.f, value);
+
+            regs.write_u8(register, result);
+
+            regs
+        });
     }
 
     pub fn alu2(&self, dst: Reg8, src: Reg8, op: impl FnOnce(&mut Flags, u8, u8) -> u8) {
-        let mut registers = self.registers_mut();
-        let (a, b) = (registers.read_u8(dst), registers.read_u8(src));
-        let result = op(&mut registers.f, a, b);
-        registers.write_u8(dst, result);
+        self.state.registers.update(|mut regs| {
+            let (a, b) = (regs.read_u8(dst), regs.read_u8(src));
+            let result = op(&mut regs.f, a, b);
+            regs.write_u8(dst, result);
+
+            regs
+        });
     }
 
     pub fn alu16(&self, register: Reg16, op: impl FnOnce(&mut Flags, u16) -> u16) {
-        let mut registers = self.registers_mut();
-        let value = registers.read_u16(register);
-        let result = op(&mut registers.f, value);
-        registers.write_u16(register, result);
+        self.state.registers.update(|mut regs| {
+            let value = regs.read_u16(register);
+            let result = op(&mut regs.f, value);
+            regs.write_u16(register, result);
+
+            regs
+        });
     }
 
     pub fn alu16_2(
@@ -301,10 +345,13 @@ impl CpuTask {
         b: Reg16,
         op: impl FnOnce(&mut Flags, u16, u16) -> u16,
     ) {
-        let mut registers = self.registers_mut();
-        let (a, b) = (registers.read_u16(a), registers.read_u16(b));
-        let result = op(&mut registers.f, a, b);
-        registers.write_u16(dst, result);
+        self.state.registers.update(|mut regs| {
+            let (a, b) = (regs.read_u16(a), regs.read_u16(b));
+            let result = op(&mut regs.f, a, b);
+            regs.write_u16(dst, result);
+
+            regs
+        });
     }
 
     /// mixed-width one, for `add sp,r8` and `ld hl,sp+r8`. `dst` is
@@ -315,62 +362,79 @@ impl CpuTask {
         b: Reg8,
         op: impl FnOnce(&mut Flags, u16, u8) -> u16,
     ) {
-        let mut registers = self.registers_mut();
-        let (a, b) = (registers.read_u16(a), registers.read_u8(b));
-        let result = op(&mut registers.f, a, b);
-        registers.write_u16(dst, result);
+        self.state.registers.update(|mut regs| {
+            let (a, b) = (regs.read_u16(a), regs.read_u8(b));
+            let result = op(&mut regs.f, a, b);
+            regs.write_u16(dst, result);
+
+            regs
+        });
     }
 
     pub fn mov(&self, dst: Reg8, src: Reg8) {
-        let mut registers = self.registers_mut();
-        let val = registers.read_u8(src);
-        registers.write_u8(dst, val);
+        self.state.registers.update(|mut regs| {
+            let val = regs.read_u8(src);
+            regs.write_u8(dst, val);
+
+            regs
+        });
     }
 
     pub fn mov16(&self, dst: Reg16, src: Reg16) {
-        let mut registers = self.registers_mut();
-        let val = registers.read_u16(src);
-        registers.write_u16(dst, val);
+        self.state.registers.update(|mut regs| {
+            let val = regs.read_u16(src);
+            regs.write_u16(dst, val);
+
+            regs
+        });
     }
 
     pub fn set16(&self, dst: Reg16, value: u16) {
-        self.registers_mut().write_u16(dst, value);
+        self.state.registers.update(|mut regs| {
+            regs.write_u16(dst, value);
+            regs
+        });
     }
 
     /// `bit b,r`: one register in, flags out, nothing written back. The bit
     /// index rides in the closure, since it comes from the opcode rather than
     /// the register file.
     pub fn test(&self, register: Reg8, op: impl FnOnce(&mut Flags, u8)) {
-        let mut registers = self.registers_mut();
-        let value = registers.read_u8(register);
-        op(&mut registers.f, value);
+        self.state.registers.update(|mut regs| {
+            let value = regs.read_u8(register);
+            op(&mut regs.f, value);
+
+            regs
+        });
     }
 
     /// `cp`: two registers in, neither written.
     pub fn test2(&self, left: Reg8, right: Reg8, op: impl FnOnce(&mut Flags, u8, u8)) {
-        let mut registers = self.registers_mut();
-        let (a, b) = (registers.read_u8(left), registers.read_u8(right));
-        op(&mut registers.f, a, b);
+        self.state.registers.update(|mut regs| {
+            let (a, b) = (regs.read_u8(left), regs.read_u8(right));
+            op(&mut regs.f, a, b);
+
+            regs
+        });
     }
 
     pub fn flags(&self, op: impl FnOnce(&mut Flags)) {
-        op(&mut self.registers_mut().f)
+        self.state.registers.update(|mut regs| {
+            op(&mut regs.f);
+            regs
+        });
     }
 
     pub fn ei(&self) {
-        self.cpu.set_ime(Ime::Pending);
+        self.set_ime(Ime::Pending);
     }
 
     pub fn ei_now(&self) {
-        self.cpu.set_ime(Ime::Enabled);
+        self.set_ime(Ime::Enabled);
     }
 
     pub fn di(&self) {
-        self.cpu.set_ime(Ime::Disabled);
-    }
-
-    pub fn halt(&self) {
-        self.cpu.halt();
+        self.set_ime(Ime::Disabled);
     }
 
     pub async fn stop(&mut self) {
@@ -386,7 +450,7 @@ impl CpuTask {
             if interrupt_pending == 0 {
                 // STOP => 2 bytes
                 self.fetch(Reg8::Z).await;
-                self.cpu.halt();
+                self.halt();
             }
             return;
         }
@@ -438,7 +502,7 @@ impl CpuTask {
     }
 
     pub async fn illegal(&self) -> Infallible {
-        self.cpu.wedged.set(true);
+        self.state.wedged.set(true);
         future::pending::<Infallible>().await
     }
 }

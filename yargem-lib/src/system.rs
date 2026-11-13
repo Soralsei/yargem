@@ -4,6 +4,7 @@ use std::rc::Rc;
 use crate::audio::apu::Apu;
 use crate::clock::{CpuClock, Cycles, Time};
 use crate::compat::DmgCompat;
+use crate::cpu::cpu::Cpu;
 use crate::debug::debugger::{Debugger, RunMode};
 use crate::debug::protocol::{BankAddr, DebugCommand, DebugEvent, RegisterSnapshot, StopReason};
 use crate::graphics::oam::DMAController;
@@ -19,7 +20,7 @@ use crate::YargemError;
 use super::memory::mmu::MemoryHandler;
 use crate::memory::boot_rom::BootRom;
 
-use super::cpu::cpu::Cpu;
+use super::cpu::cpu::CpuView;
 use super::cpu::interrupt::InterruptController;
 #[cfg(feature = "blaarg")]
 use super::debug::blaarg_spy::BlaargSpy;
@@ -91,7 +92,7 @@ impl Default for Settings {
 }
 
 pub struct System {
-    cpu: Rc<Cpu>,
+    cpu: Rc<CpuView>,
     mmu: Rc<Mmu>,
     irq: Rc<InterruptController>,
     ppu: Rc<Ppu>,
@@ -141,7 +142,6 @@ impl System {
 
         // The bus is shared: the CPU drives it, and clocked devices that move
         // bytes themselves (OAM DMA, the PPU fetcher) need a handle to it too.
-        let cpu = Rc::new(Cpu::new(is_cgb, power_on));
         let ppu = Rc::new(Ppu::new(
             interrupt_controller.request(),
             bus.clone(),
@@ -228,17 +228,16 @@ impl System {
         let cpu_clock = time.cpu.clone();
         let fixed_clock = time.fixed.clone();
 
-        time.spawn(|(t_cpu, t_fixed)| {
-            Cpu::task(
-                cpu.clone(),
-                CpuBus(mmu.clone()),
-                interrupt_controller.clone(),
-                t_cpu,
-                t_fixed,
-                cpu_clock,
-                fixed_clock,
-            )
-        });
+        let cpu = Cpu::new(
+            CpuBus(mmu.clone()),
+            interrupt_controller.clone(),
+            cpu_clock,
+            fixed_clock,
+            is_cgb,
+            power_on,
+        );
+
+        time.spawn(move |(t_cpu, t_fixed)| cpu.run());
 
         Ok(Self {
             cpu,

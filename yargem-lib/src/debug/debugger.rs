@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    cpu::cpu::Cpu,
+    cpu::cpu::CpuView,
     debug::{
         breakpoint::Breakpoints,
         protocol::{
@@ -237,7 +237,7 @@ impl Debugger {
     pub fn handle(
         &mut self,
         cmd: DebugCommand,
-        cpu: &Cpu,
+        cpu: &CpuView,
         mmu: &Mmu,
         ppu: PpuView,
     ) -> Option<DebugEvent> {
@@ -252,7 +252,7 @@ impl Debugger {
             DebugCommand::Attach => {
                 self.attach();
                 return Some(DebugEvent::Attached {
-                    regs: RegisterSnapshot(*cpu.registers.borrow()),
+                    regs: RegisterSnapshot(cpu.registers()),
                     breaks: self.breakpoints.get(),
                     watches: self.watch_tap.get(),
                 });
