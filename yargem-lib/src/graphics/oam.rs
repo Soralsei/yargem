@@ -11,12 +11,6 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy)]
-enum OAMTransferState {
-    Idle,
-    InProgress,
-}
-
 struct DMAState {
     pub src_addr_reg: Cell<u8>,
     pub requested: Cell<bool>,

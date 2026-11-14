@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use super::registers::Registers;
 use crate::clock::{self, OscillatorRequest, Timeline, M_CYCLE};
+use crate::cpu::hold::HoldLine;
 use crate::cpu::instructions::{execute_prefixed, execute_unprefixed};
 use crate::cpu::interrupt::InterruptController;
 use crate::cpu::registers::{Flags, Reg16, Reg8};
@@ -77,15 +78,19 @@ impl CpuView {
     }
 }
 
+pub struct ControlLines {
+    pub int: Listener,          // /INT: HALT wake, interrupt dispatch
+    pub bus: HoldLine,          // /BUSREQ + /BUSACK:
+    pub osc: OscillatorRequest, // STOP, speed switch (SM83/CGB only)
+}
+
 pub struct Cpu {
     // lazily initialized in the run() method
     t: Option<Timeline<clock::Cpu>>,
 
     bus: CpuBus,
     irq: Rc<InterruptController>,
-    irq_listener: Listener,
-
-    oscillator_req: OscillatorRequest,
+    control_lines: ControlLines,
 
     state: Rc<CpuState>,
 
@@ -96,17 +101,15 @@ impl Cpu {
     pub fn new(
         bus: CpuBus,
         irq: Rc<InterruptController>,
-        oscillator_req: OscillatorRequest,
+        control_lines: ControlLines,
         is_cgb: bool,
         power_on: PowerOn,
     ) -> Cpu {
-        let listener = irq.take_listener();
         Self {
             t: None,
             bus,
             irq,
-            irq_listener: listener,
-            oscillator_req,
+            control_lines,
             state: Rc::new(CpuState::new(power_on, is_cgb)),
             halt_bug: false,
         }
@@ -138,7 +141,7 @@ impl Cpu {
                 self.halt_bug = true;
             } else {
                 let t = t!(self);
-                t.after(self.irq_listener.until(|| self.irq.peek().is_some()))
+                t.after(self.control_lines.int.until(|| self.irq.peek().is_some()))
                     .await;
             }
             self.state.halted.set(false);
@@ -455,7 +458,7 @@ impl Cpu {
             return;
         }
 
-        if self.oscillator_req.switch_armed() {
+        if self.control_lines.osc.switch_armed() {
             if interrupt_pending == 0 {
                 // STOP => 2 bytes
                 self.fetch(Reg8::Z).await;
@@ -469,7 +472,7 @@ impl Cpu {
 
             // Reset DIV
             self.bus.poke(0xFF04, 0); // value does not matter
-            t!(self).after(self.oscillator_req.speed_switch()).await;
+            t!(self).after(self.control_lines.osc.speed_switch()).await;
 
             return;
         }
@@ -482,7 +485,7 @@ impl Cpu {
         // Reset DIV
         self.bus.poke(0xFF04, 0); // value does not matter
 
-        t!(self).after(self.oscillator_req.stop_mode()).await;
+        t!(self).after(self.control_lines.osc.stop_mode()).await;
     }
 
     pub async fn idle(&self) {

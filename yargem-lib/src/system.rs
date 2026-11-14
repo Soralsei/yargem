@@ -4,7 +4,8 @@ use std::rc::Rc;
 use crate::audio::apu::Apu;
 use crate::clock::{CpuClock, Cycles, Oscillator};
 use crate::compat::DmgCompat;
-use crate::cpu::cpu::Cpu;
+use crate::cpu::cpu::{ControlLines, Cpu};
+use crate::cpu::hold::hold_line;
 use crate::debug::debugger::{Debugger, RunMode};
 use crate::debug::protocol::{BankAddr, DebugCommand, DebugEvent, RegisterSnapshot, StopReason};
 use crate::executor::Time;
@@ -149,6 +150,7 @@ impl System {
 
         let bus = Rc::new(Bus::new());
         let dma = Rc::new(DMAController::new(bus.clone()));
+        let (hold_req, hold_line) = hold_line();
 
         // The bus is shared: the CPU drives it, and clocked devices that move
         // bytes themselves (OAM DMA, the PPU fetcher) need a handle to it too.
@@ -236,10 +238,15 @@ impl System {
 
         time.spawn(|t| Oscillator::task(oscillator, o_line, joypad.take_input_line(), t));
 
+        let control_lines = ControlLines {
+            int: interrupt_controller.take_listener(),
+            bus: hold_line,
+            osc: o_req,
+        };
         let cpu = Cpu::new(
             CpuBus(mmu.clone()),
             interrupt_controller.clone(),
-            o_req,
+            control_lines,
             is_cgb,
             power_on,
         );
