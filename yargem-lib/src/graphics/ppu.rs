@@ -4,8 +4,9 @@ use std::convert::Infallible;
 use std::pin::pin;
 use std::rc::Rc;
 
-use crate::clock::{signal, Fixed, Listener, Raiser, Timeline};
+use crate::clock::{Fixed, Timeline};
 use crate::cpu::interrupt::InterruptRequest;
+use crate::executor::{signal, Listener, Raiser};
 use crate::graphics::attributes::{BgAttributes, CGBBank, ObjectAttribute, TilePriority};
 use crate::graphics::cgb::CgbPpu;
 use crate::graphics::fifo::{BgFIFO, ObjFIFO, Pixel};
@@ -14,7 +15,6 @@ use crate::memory::bus::{Bus, BusOwner, BusType};
 use crate::memory::mmu::{MemoryContext, MemoryHandler};
 use crate::mode::ConsoleMode;
 use crate::system::PowerOn;
-use crate::util::bit_operations::word_to_bytes;
 use crate::util::future::Race;
 use crate::{is_bit_set, SCREEN_H, SCREEN_W};
 
@@ -177,7 +177,7 @@ impl Ppu {
                 this.registers.borrow_mut().set_ly(0);
                 this.set_mode(PpuMode::HBlank);
                 timeline
-                    .after(lcdc.until(|| this.registers.borrow().lcdc().lcd_ppu_enable))
+                    .after_delayed(lcdc.until(|| this.registers.borrow().lcdc().lcd_ppu_enable))
                     .await;
             }
 
@@ -726,17 +726,19 @@ impl<'a> PpuView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::Time;
     use crate::cpu::interrupt::InterruptController;
+    use crate::executor::Time;
     use crate::memory::mmu::{AddressMap, Mmu, Source};
+    use crate::util::cpu_stand_in::CpuStandIn;
 
-    /// Drives the PPU alone, with no CPU: VRAM is poked directly, and registers
-    /// go through the PPU's own write handler, since an LCDC write is what
-    /// wakes a PPU parked with the LCD off.
+    /// Drives the PPU alone: VRAM is poked directly, and registers go through
+    /// the PPU's own write handler from a CPU stand-in, since an LCDC write is
+    /// what wakes a PPU parked with the LCD off.
     struct Harness {
         time: Time,
+        cpu: CpuStandIn,
         ppu: Rc<Ppu>,
-        mmu: Mmu,
+        mmu: Rc<Mmu>,
         _interrupts: Rc<InterruptController>,
     }
 
@@ -752,25 +754,29 @@ mod tests {
                 [0, 1, 2, 3],
             ));
             time.spawn(|timeline: Timeline<Fixed>| Ppu::task(ppu.clone(), timeline));
+            let cpu = CpuStandIn::spawn(&mut time);
             Self {
                 time,
+                cpu,
                 ppu,
                 // The handler never reads through the MMU; it only needs one to call.
-                mmu: Mmu::new(AddressMap::new()),
+                mmu: Rc::new(Mmu::new(AddressMap::new())),
                 _interrupts: interrupts,
             }
         }
 
-        fn memory_ctx(&self) -> MemoryContext<'_> {
-            MemoryContext {
-                mmu: &self.mmu,
-                next: &[],
-                source: Source::Dma,
-            }
-        }
-
-        fn reg(&self, address: u16, value: u8) {
-            let _ = self.ppu.write(address, value, self.memory_ctx());
+        /// Lands where the CPU's write does: inside the current dot's poll,
+        /// after the PPU's.
+        fn reg(&mut self, address: u16, value: u8) {
+            let (ppu, mmu) = (self.ppu.clone(), self.mmu.clone());
+            self.cpu.write(&mut self.time, move || {
+                let ctx = MemoryContext {
+                    mmu: &mmu,
+                    next: &[],
+                    source: Source::Dma,
+                };
+                let _ = ppu.write(address, value, ctx);
+            });
         }
 
         fn vram(&self, address: u16, value: u8) {
@@ -794,7 +800,7 @@ mod tests {
     /// LCDC 0x91: LCD on, BG on, tilemap 0x9800, tile data 0x8000.
     /// BGP 0xE4: colour id 0->0, 1->1, 2->2, 3->3.
     fn basic_bg() -> Harness {
-        let h = Harness::new();
+        let mut h = Harness::new();
         h.reg(0xFF40, 0x91);
         h.reg(0xFF47, 0xE4);
         h.reg(0xFF42, 0); // SCY

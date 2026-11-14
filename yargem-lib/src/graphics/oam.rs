@@ -3,7 +3,8 @@
 use std::{cell::Cell, convert::Infallible, rc::Rc};
 
 use crate::{
-    clock::{signal, Cpu, Cycles, Listener, Raiser, Timeline, M_CYCLE},
+    clock::{Cpu, Cycles, Timeline, M_CYCLE},
+    executor::{signal, Listener, Raiser},
     memory::{
         bus::{Bus, BusOwner, BusType},
         mmu::{MemoryContext, MemoryHandler, Mmu, Source},
@@ -57,7 +58,7 @@ impl DMAController {
         let mut requests = this.listener.take().expect("DMA task spawned twice");
         'outer: loop {
             timeline
-                .after(requests.until(|| this.state.requested.take()))
+                .after_delayed(requests.until(|| this.state.requested.take()))
                 .await;
             let src = (this.state.src_addr_reg.get() as u16) << 8;
             for offset in 0..0xA0u16 {
@@ -110,8 +111,9 @@ impl MemoryHandler for DMAController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::Time;
+    use crate::executor::Time;
     use crate::memory::mmu::AddressMap;
+    use crate::util::cpu_stand_in::CpuStandIn;
 
     const WRAM_PAGE: u8 = 0xC0;
     const VRAM_PAGE: u8 = 0x80;
@@ -120,6 +122,7 @@ mod tests {
     /// stores every byte, so OAM and both source pages are ordinary RAM.
     struct Harness {
         time: Time,
+        cpu: CpuStandIn,
         mmu: Rc<Mmu>,
         bus: Rc<Bus>,
     }
@@ -133,7 +136,13 @@ mod tests {
             map.add((0xFF46, 0xFF46), dma.clone());
             let mmu = Rc::new(Mmu::new(map));
             time.spawn(|t: Timeline<Cpu>| DMAController::task(dma, mmu.clone(), t));
-            Self { time, mmu, bus }
+            let cpu = CpuStandIn::spawn(&mut time);
+            Self {
+                time,
+                cpu,
+                mmu,
+                bus,
+            }
         }
 
         /// Every byte of the page distinct, so a byte from the wrong transfer or
@@ -146,10 +155,12 @@ mod tests {
             }
         }
 
-        /// Called between ticks on an M-cycle boundary, which is where the CPU
-        /// writes: after the DMA's poll for that cycle.
-        fn start(&self, page: u8) {
-            self.mmu.write(0xFF46, page, Source::Dma);
+        /// Called on an M-cycle boundary. The write lands where the CPU's does:
+        /// inside that dot's poll, after the DMA's.
+        fn start(&mut self, page: u8) {
+            let mmu = self.mmu.clone();
+            self.cpu
+                .write(&mut self.time, move || mmu.write(0xFF46, page, Source::Dma));
         }
 
         fn m_cycles(&mut self, n: u32) {

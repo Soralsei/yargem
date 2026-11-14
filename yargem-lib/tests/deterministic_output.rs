@@ -1,6 +1,6 @@
 use fasthash::XXHasher;
 use std::hash::Hasher;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fs, hash::Hash};
 
 use yargem_lib::{
@@ -9,6 +9,24 @@ use yargem_lib::{
 };
 
 const BASELINE_PATH: &str = "tests/fixtures/";
+
+fn dump_rgb555_ppm(path: &std::path::Path, fb: &[u16]) {
+    // CGB native resolution: 160x144
+    let mut out = Vec::with_capacity(32 + fb.len() * 3);
+    out.extend_from_slice(b"P6\n160 144\n255\n");
+
+    for &px in fb {
+        let r5 = (px & 0x1F) as u8;
+        let g5 = ((px >> 5) & 0x1F) as u8;
+        let b5 = ((px >> 10) & 0x1F) as u8;
+
+        out.push((r5 << 3) | (r5 >> 2));
+        out.push((g5 << 3) | (g5 >> 2));
+        out.push((b5 << 3) | (b5 >> 2));
+    }
+
+    std::fs::write(path, out).expect("failed to write debug PPM");
+}
 
 #[test]
 fn verify_frame_hashes() {
@@ -74,11 +92,12 @@ fn verify_frame_hashes() {
         "frame count mismatch"
     );
 
-    for (actual, expected) in actual_hashes.iter().zip(expected_hashes.iter()) {
+    for (frame, (actual, expected)) in actual_hashes.iter().zip(expected_hashes.iter()).enumerate()
+    {
         assert_eq!(
             actual,
             expected,
-            "Framebuffer diverged at frame (registers : {})",
+            "Framebuffer diverged at frame {frame} (registers : {})",
             emu.registers().0
         );
     }

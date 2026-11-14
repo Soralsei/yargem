@@ -6,8 +6,9 @@ use std::{
 };
 
 use crate::{
-    clock::{edge, Cpu, CpuClock, Cycles, EdgeListener, EdgeRaiser, Timeline, M_CYCLE},
+    clock::{Cpu, CpuClock, Cycles, Timeline, M_CYCLE},
     cpu::interrupt::InterruptRequest,
+    executor::{edge, EdgeListener, EdgeRaiser},
     is_bit_set,
     memory::mmu::{MemoryContext, MemoryHandler},
     util::future::Race,
@@ -106,7 +107,7 @@ impl Timer {
                 .borrow()
                 .cycles_to_next_event(this.div(), this.div_apu_bit());
 
-            let write = pin!(timeline.after(writes.next()));
+            let write = pin!(timeline.after_delayed(writes.next()));
             let deadline = pin!(timeline.wait(n as Cycles));
 
             Race::new(write, deadline).await;
@@ -246,19 +247,21 @@ impl MemoryHandler for Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::Time;
     use crate::cpu::interrupt::InterruptController;
+    use crate::executor::Time;
     use crate::memory::mmu::{AddressMap, Mmu, Source};
+    use crate::util::cpu_stand_in::CpuStandIn;
 
-    /// Drives the timer alone. Registers go through its own handler between
-    /// ticks, which is where the CPU writes: after the timer's poll for that
-    /// cycle.
+    /// Drives the timer alone. Registers go through its own handler from a CPU
+    /// stand-in, so a write lands where the CPU's does: inside the current
+    /// dot's poll, after the timer's.
     struct Harness {
         time: Time,
+        cpu: CpuStandIn,
         timer: Rc<Timer>,
         irq: Rc<InterruptController>,
         // The handlers never read through the MMU; they only need one to call.
-        mmu: Mmu,
+        mmu: Rc<Mmu>,
     }
 
     impl Harness {
@@ -267,10 +270,12 @@ mod tests {
             let irq = Rc::new(InterruptController::new());
             let timer = Rc::new(Timer::new(irq.request(), time.cpu.clone(), false));
             let t = timer.clone();
-            let mmu = Mmu::new(AddressMap::new());
+            let mmu = Rc::new(Mmu::new(AddressMap::new()));
             time.spawn(move |timeline: Timeline<Cpu>| Timer::task(t, timeline));
+            let cpu = CpuStandIn::spawn(&mut time);
             Self {
                 time,
+                cpu,
                 timer,
                 irq,
                 mmu,
@@ -285,8 +290,16 @@ mod tests {
             }
         }
 
-        fn write(&self, address: u16, value: u8) {
-            let _ = self.timer.write(address, value, self.next());
+        fn write(&mut self, address: u16, value: u8) {
+            let (timer, mmu) = (self.timer.clone(), self.mmu.clone());
+            self.cpu.write(&mut self.time, move || {
+                let ctx = MemoryContext {
+                    mmu: &mmu,
+                    next: &[],
+                    source: Source::Cpu,
+                };
+                let _ = timer.write(address, value, ctx);
+            });
         }
 
         fn tima(&self) -> u8 {

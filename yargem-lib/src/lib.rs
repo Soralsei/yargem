@@ -3,6 +3,7 @@ mod clock;
 mod compat;
 mod cpu;
 pub mod debug;
+mod executor;
 mod graphics;
 pub mod input;
 mod memory;

@@ -1,9 +1,10 @@
-use std::cell::Cell;
+use std::{cell::Cell, ops::Deref, rc::Rc};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     cpu::interrupt::InterruptRequest,
+    executor::{signal, Listener, Raiser, Until, Untimed},
     memory::mmu::{MemoryContext, MemoryHandler},
 };
 
@@ -79,19 +80,48 @@ impl Joypad {
     }
 }
 
+pub struct InputLine {
+    listener: Listener,
+    got_input: Rc<Cell<bool>>,
+}
+
+impl InputLine {
+    pub fn until_input(&mut self) -> Untimed<Until<'_, impl Fn() -> bool + '_>> {
+        self.got_input.set(false);
+        self.listener.until(|| self.got_input.take())
+    }
+}
+
 /// `Joypad` is `Copy`, so the whole state fits in one `Cell`: get, mutate the
 /// copy, set. No borrow semantics on the bus path at all.
 pub struct JoypadHandler {
     interrupt_request: InterruptRequest,
     joypad: Cell<Joypad>,
+    input_line: Cell<Option<InputLine>>,
+    input_pulse: Raiser,
+    got_input: Rc<Cell<bool>>,
 }
 
 impl JoypadHandler {
     pub fn new(interrupt_request: InterruptRequest) -> Self {
+        let (input_pulse, listener) = signal();
+        let got_input = Rc::new(Cell::new(false));
+
+        let input_line = Cell::new(Some(InputLine {
+            got_input: got_input.clone(),
+            listener,
+        }));
         Self {
             interrupt_request,
             joypad: Cell::new(Joypad::default()),
+            got_input,
+            input_line,
+            input_pulse,
         }
+    }
+
+    pub fn take_input_line(&self) -> InputLine {
+        self.input_line.take().expect("Input line was taken twice")
     }
 
     pub fn set(&self, button: Button, down: bool) {
@@ -108,6 +138,8 @@ impl JoypadHandler {
         let fell = before & !after != 0;
         if fell {
             self.interrupt_request.joypad(true);
+            self.got_input.set(true);
+            self.input_pulse.raise();
         }
     }
 }

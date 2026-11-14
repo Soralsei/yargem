@@ -6,7 +6,8 @@ use std::{
 };
 
 use super::mmu::MemoryHandler;
-use crate::clock::{signal, Cpu, Listener, Raiser};
+use crate::clock::Cpu;
+use crate::executor::{signal, Listener, Raiser};
 use crate::memory::mmu::MemoryContext;
 use crate::{
     clock::{Cycles, Timeline},
@@ -83,7 +84,7 @@ impl<S: ByteSink> Serial<S> {
             // Idle until software arms a transfer. No borrow may straddle an
             // await: the SC write handler takes the same cell.
             timeline
-                .after(writes.until(|| {
+                .after_delayed(writes.until(|| {
                     let state = this.state.borrow();
                     state.transfer_enable && state.clock_select
                 }))

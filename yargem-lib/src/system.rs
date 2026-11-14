@@ -2,17 +2,18 @@ use std::cell::Ref;
 use std::rc::Rc;
 
 use crate::audio::apu::Apu;
-use crate::clock::{CpuClock, Cycles, Time};
+use crate::clock::{CpuClock, Cycles, Oscillator};
 use crate::compat::DmgCompat;
 use crate::cpu::cpu::Cpu;
 use crate::debug::debugger::{Debugger, RunMode};
 use crate::debug::protocol::{BankAddr, DebugCommand, DebugEvent, RegisterSnapshot, StopReason};
+use crate::executor::Time;
 use crate::graphics::oam::DMAController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
 use crate::memory::bus::{Bus, CpuBus};
 use crate::memory::mbc::Cartridge;
-use crate::memory::mmu::AddressMap;
+use crate::memory::mmu::{AddressMap, MemoryContext};
 use crate::mode::ConsoleMode;
 use crate::timer::Timer;
 use crate::YargemError;
@@ -40,11 +41,11 @@ const DEFAULT_DMG: [u16; 4] = [
 struct SpeedSwitch(Rc<CpuClock>);
 
 impl MemoryHandler for SpeedSwitch {
-    fn read(&self, _address: u16, _next: crate::memory::mmu::MemoryContext<'_>) -> u8 {
+    fn read(&self, _address: u16, _ctx: MemoryContext<'_>) -> u8 {
         self.0.key1()
     }
 
-    fn write(&self, _address: u16, value: u8, _next: crate::memory::mmu::MemoryContext<'_>) {
+    fn write(&self, _address: u16, value: u8, _ctx: MemoryContext<'_>) {
         self.0.arm(value & 1 != 0);
     }
 }
@@ -52,8 +53,11 @@ impl MemoryHandler for SpeedSwitch {
 struct Unmapped;
 
 impl MemoryHandler for Unmapped {
-    fn read(&self, _address: u16, _next: crate::memory::mmu::MemoryContext<'_>) -> u8 {
+    fn read(&self, _address: u16, _ctx: MemoryContext<'_>) -> u8 {
         0xFF
+    }
+    fn write(&self, _address: u16, _value: u8, _ctx: MemoryContext<'_>) {
+        // Block writes
     }
 }
 
@@ -92,7 +96,7 @@ impl Default for Settings {
 }
 
 pub struct System {
-    cpu: Rc<CpuView>,
+    cpu: CpuView,
     mmu: Rc<Mmu>,
     irq: Rc<InterruptController>,
     ppu: Rc<Ppu>,
@@ -135,6 +139,12 @@ impl System {
             time.cpu.clone(),
             is_cgb,
         ));
+
+        let clock = time.cpu.clone();
+        let fixed = time.fixed.clone();
+        let oscillator = Rc::new(Oscillator::new(clock, fixed));
+        let (o_req, o_line) = oscillator.line();
+
         let joypad = Rc::new(JoypadHandler::new(interrupt_controller.request()));
 
         let bus = Rc::new(Bus::new());
@@ -192,14 +202,13 @@ impl System {
 
         let compat = Rc::new(DmgCompat::new(power_on));
         let unmapped = Rc::new(Unmapped);
-        let key1 = Rc::new(SpeedSwitch(time.cpu.clone()));
 
         let cgb_io: [(u16, u16, Rc<dyn MemoryHandler>); 5] = [
-            (0xFF4D, 0xFF4D, key1),             //KEY1
-            (0xFF4F, 0xFF4F, ppu.clone()),      //VBK
-            (0xFF51, 0xFF55, unmapped.clone()), // TODO HDMA1-5
-            (0xFF68, 0xFF6B, ppu.clone()),      // BCPS/BCPD/OCPS/OCPD
-            (0xFF70, 0xFF70, unmapped.clone()), // TODO WBK
+            (0xFF4D, 0xFF4D, oscillator.clone()), //KEY1
+            (0xFF4F, 0xFF4F, ppu.clone()),        //VBK
+            (0xFF51, 0xFF55, unmapped.clone()),   // TODO HDMA1-5
+            (0xFF68, 0xFF6B, ppu.clone()),        // BCPS/BCPD/OCPS/OCPD
+            (0xFF70, 0xFF70, unmapped.clone()),   // TODO WBK
         ];
         for (start, end, handler) in cgb_io {
             if is_cgb {
@@ -225,22 +234,21 @@ impl System {
 
         time.spawn(|()| Apu::frame_sequencer_task(apu.clone(), timer.div_apu()));
 
-        let cpu_clock = time.cpu.clone();
-        let fixed_clock = time.fixed.clone();
+        time.spawn(|t| Oscillator::task(oscillator, o_line, joypad.take_input_line(), t));
 
         let cpu = Cpu::new(
             CpuBus(mmu.clone()),
             interrupt_controller.clone(),
-            cpu_clock,
-            fixed_clock,
+            o_req,
             is_cgb,
             power_on,
         );
+        let cpu_view = cpu.view();
 
-        time.spawn(move |(t_cpu, t_fixed)| cpu.run());
+        time.spawn(move |t| cpu.run(t));
 
         Ok(Self {
-            cpu,
+            cpu: cpu_view,
             mmu,
             debugger,
             irq: interrupt_controller,
@@ -322,7 +330,7 @@ impl System {
     }
 
     pub fn registers(&self) -> RegisterSnapshot {
-        RegisterSnapshot(*self.cpu.registers.borrow())
+        RegisterSnapshot(self.cpu.registers())
     }
 
     pub fn paused(&self) -> bool {

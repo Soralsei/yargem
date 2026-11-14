@@ -1,7 +1,7 @@
 use std::{cell::Cell, rc::Rc};
 
 use crate::{
-    clock::{signal, Listener, Raiser},
+    executor::{signal, Listener, Raiser},
     is_bit_set,
     memory::mmu::{MemoryContext, MemoryHandler},
 };

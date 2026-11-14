@@ -5,14 +5,21 @@ use std::hint::cold_path;
 use std::rc::Rc;
 
 use super::registers::Registers;
-use crate::clock::{self, CpuClock, CpuTime, Fixed, FixedClock, Listener, Timeline, M_CYCLE};
+use crate::clock::{self, OscillatorRequest, Timeline, M_CYCLE};
 use crate::cpu::instructions::{execute_prefixed, execute_unprefixed};
 use crate::cpu::interrupt::InterruptController;
 use crate::cpu::registers::{Flags, Reg16, Reg8};
+use crate::executor::Listener;
 use crate::memory::bus::CpuBus;
 use crate::system::PowerOn;
 use crate::util::bit_operations::*;
 use yargem_common::Condition;
+
+macro_rules! t {
+    ($self:expr) => {
+        $self.t.as_ref().expect("missing timeline in Cpu")
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Ime {
@@ -71,14 +78,16 @@ impl CpuView {
 }
 
 pub struct Cpu {
+    // lazily initialized in the run() method
+    t: Option<Timeline<clock::Cpu>>,
+
     bus: CpuBus,
     irq: Rc<InterruptController>,
     irq_listener: Listener,
 
-    state: Rc<CpuState>,
+    oscillator_req: OscillatorRequest,
 
-    clock: Rc<CpuClock>,
-    fixed_clock: Rc<FixedClock>,
+    state: Rc<CpuState>,
 
     halt_bug: bool,
 }
@@ -87,19 +96,18 @@ impl Cpu {
     pub fn new(
         bus: CpuBus,
         irq: Rc<InterruptController>,
-        clock: Rc<CpuClock>,
-        fixed_clock: Rc<FixedClock>,
+        oscillator_req: OscillatorRequest,
         is_cgb: bool,
         power_on: PowerOn,
     ) -> Cpu {
         let listener = irq.take_listener();
         Self {
+            t: None,
             bus,
             irq,
             irq_listener: listener,
+            oscillator_req,
             state: Rc::new(CpuState::new(power_on, is_cgb)),
-            clock,
-            fixed_clock,
             halt_bug: false,
         }
     }
@@ -108,11 +116,8 @@ impl Cpu {
         CpuView(self.state.clone())
     }
 
-    pub async fn run(
-        mut self,
-        t: Timeline<clock::Cpu>,
-        t_fixed: Timeline<clock::Fixed>,
-    ) -> Infallible {
+    pub async fn run(mut self, t: Timeline<clock::Cpu>) -> Infallible {
+        self.t = Some(t);
         loop {
             self.step().await
         }
@@ -126,19 +131,14 @@ impl Cpu {
         self.state.ime.set(active);
     }
 
-    pub fn wedged(&self) -> bool {
-        self.state.wedged.get()
-    }
-
     pub async fn step(&mut self) {
         if self.state.halted.get() {
             if self.state.ime.get() == Ime::Disabled && self.irq.peek().is_some() {
                 // halt bug: PC fails to increment, next byte executes twice
                 self.halt_bug = true;
             } else {
-                self.time
-                    .t
-                    .after(self.irq_listener.until(|| self.irq.peek().is_some()))
+                let t = t!(self);
+                t.after(self.irq_listener.until(|| self.irq.peek().is_some()))
                     .await;
             }
             self.state.halted.set(false);
@@ -194,7 +194,7 @@ impl Cpu {
     }
 
     pub async fn fetch(&mut self, dst: Reg8) {
-        self.t.wait(M_CYCLE).await;
+        t!(self).wait(M_CYCLE).await;
 
         let mut registers = self.state.registers.get();
         let pc = registers.pc;
@@ -213,7 +213,7 @@ impl Cpu {
     }
 
     pub async fn load(&self, dst: Reg8, addr: u16) {
-        self.t.wait(M_CYCLE).await;
+        t!(self).wait(M_CYCLE).await;
 
         self.state.registers.update(|mut regs| {
             regs.write_u8(dst, self.bus.read(addr));
@@ -222,7 +222,7 @@ impl Cpu {
     }
 
     pub async fn store(&self, address: u16, src: Reg8) {
-        self.t.wait(M_CYCLE).await;
+        t!(self).wait(M_CYCLE).await;
 
         self.bus
             .write(address, self.state.registers.get().read_u8(src));
@@ -231,10 +231,10 @@ impl Cpu {
     pub async fn store16(&self, addr: u16, src: Reg16) {
         let (msb, lsb) = word_to_bytes(self.state.registers.get().read_u16(src));
 
-        self.t.wait(M_CYCLE).await;
+        t!(self).wait(M_CYCLE).await;
         self.bus.write(addr, lsb);
 
-        self.t.wait(M_CYCLE).await;
+        t!(self).wait(M_CYCLE).await;
         self.bus.write(addr.wrapping_add(1), msb);
     }
 
@@ -266,7 +266,7 @@ impl Cpu {
     }
 
     pub async fn push(&self, value: u8) {
-        self.t.wait(M_CYCLE).await;
+        t!(self).wait(M_CYCLE).await;
 
         let mut regs = self.state.registers.get();
 
@@ -279,16 +279,16 @@ impl Cpu {
     }
 
     pub async fn pop(&self) -> u8 {
-        self.t.wait(M_CYCLE).await;
+        t!(self).wait(M_CYCLE).await;
 
         let mut regs = self.state.registers.get();
 
-        let new_sp = regs.sp.wrapping_add(1);
-        regs.sp = new_sp;
+        let sp = regs.sp;
+        regs.sp = regs.sp.wrapping_add(1);
 
         self.state.registers.set(regs);
 
-        self.bus.read(new_sp)
+        self.bus.read(sp)
     }
 
     pub async fn push16(&self, value: u16) {
@@ -455,27 +455,21 @@ impl Cpu {
             return;
         }
 
-        if self.clock.switch_armed() {
+        if self.oscillator_req.switch_armed() {
             if interrupt_pending == 0 {
                 // STOP => 2 bytes
                 self.fetch(Reg8::Z).await;
             }
+
             // Maybe return some error for the non-deterministic stop glitch? idk
             //     if !self.ime {
             //         // Maybe
             //         return Err(StopGlitchError);
             //     }
+
+            // Reset DIV
             self.bus.poke(0xFF04, 0); // value does not matter
-            self.clock.switch_speed();
-
-            // Stop Cpu clock and reset DIV
-            self.clock.stop();
-
-            // The CPU sits out the next 2050 M-cycles
-            self.t_fixed.realign();
-            self.t_fixed.wait(2050 * M_CYCLE).await;
-
-            self.clock.resume();
+            t!(self).after(self.oscillator_req.speed_switch()).await;
 
             return;
         }
@@ -485,20 +479,14 @@ impl Cpu {
             // STOP => 2 bytes
             let _ = self.fetch(Reg8::Z).await;
         }
-        // For both, enter STOP mode and reset DIV
-        self.clock.stop();
+        // Reset DIV
         self.bus.poke(0xFF04, 0); // value does not matter
 
-        self.fixed_clock.stop();
-        self.t
-            .after(self.irq_listener.until(|| self.bus.peek(0xFF00) != 0x0F))
-            .await;
-        self.clock.resume();
-        self.fixed_clock.resume();
+        t!(self).after(self.oscillator_req.stop_mode()).await;
     }
 
     pub async fn idle(&self) {
-        self.t.wait(M_CYCLE).await;
+        t!(self).wait(M_CYCLE).await;
     }
 
     pub async fn illegal(&self) -> Infallible {

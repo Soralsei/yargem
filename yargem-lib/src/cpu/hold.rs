@@ -1,6 +1,6 @@
 use std::{cell::Cell, rc::Rc};
 
-use crate::clock::{signal, Listener, Raiser, Until, Untimed};
+use crate::executor::{signal, Listener, Raiser, Until, Untimed};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum LineState {
