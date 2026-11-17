@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use crate::clock::{Fixed, Timeline};
 use crate::cpu::interrupt::InterruptRequest;
-use crate::executor::{signal, Listener, Raiser};
+use crate::executor::{signal, EdgeRaiser, Listener, Raiser};
 use crate::graphics::attributes::{BgAttributes, CGBBank, ObjectAttribute, TilePriority};
 use crate::graphics::cgb::CgbPpu;
 use crate::graphics::fifo::{BgFIFO, ObjFIFO, Pixel};
@@ -104,6 +104,7 @@ pub struct Ppu {
     vram: [[Cell<u8>; 0x2000]; 2],
 
     interrupt_request: InterruptRequest,
+    mode0_raiser: EdgeRaiser,
 
     /// OAM lives on the PPU die, not in system RAM. `Cell<u8>` is layout and
     /// cost-identical to `u8`, so OAM DMA can write through the bus handler
@@ -136,6 +137,7 @@ pub struct Ppu {
 impl Ppu {
     pub fn new(
         interrupt_request: InterruptRequest,
+        mode0_raiser: EdgeRaiser,
         bus: Rc<Bus>,
         console_mode: ConsoleMode,
         power_on: PowerOn,
@@ -150,6 +152,7 @@ impl Ppu {
         Self {
             registers: RefCell::new(PpuRegisters::new(power_on)),
             interrupt_request,
+            mode0_raiser,
             vram: core::array::from_fn(|_| [const { Cell::new(0) }; 0x2000]),
             oam: [const { Cell::new(0) }; 160],
             front: RefCell::new(Box::new([0; SCREEN_W * SCREEN_H])),
@@ -256,6 +259,12 @@ impl Ppu {
                 PpuMode::Drawing => false,
             }
         };
+        if mode == PpuMode::HBlank {
+            self.mode0_raiser.raise();
+        } else {
+            self.mode0_raiser.unraise();
+        }
+
         if raise {
             self.interrupt_request.lcd(true);
         }
@@ -727,7 +736,7 @@ impl<'a> PpuView<'a> {
 mod tests {
     use super::*;
     use crate::cpu::interrupt::InterruptController;
-    use crate::executor::Time;
+    use crate::executor::{edge, Time};
     use crate::memory::mmu::{AddressMap, Mmu, Source};
     use crate::util::cpu_stand_in::CpuStandIn;
 
@@ -746,8 +755,10 @@ mod tests {
         fn new() -> Self {
             let mut time = Time::new();
             let interrupts = Rc::new(InterruptController::new());
+            let (raiser, _) = edge();
             let ppu = Rc::new(Ppu::new(
                 interrupts.request(),
+                raiser,
                 Rc::new(Bus::new()),
                 ConsoleMode::Dmg,
                 PowerOn::BootRom,

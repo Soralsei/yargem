@@ -165,6 +165,12 @@ impl Cpu {
         self.state.boundary.set(Some(self.state.registers.get().pc));
 
         self.fetch(Reg8::Z).await;
+        if self.control_lines.bus.requested() {
+            self.control_lines.bus.grant();
+            t!(self)
+                .after(self.control_lines.bus.until_released())
+                .await;
+        }
         let opcode = self.state.registers.get().z;
         match opcode {
             0xCB => {

@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::convert::Infallible;
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::ptr;
 use std::rc::Rc;
@@ -195,6 +196,10 @@ impl EdgeRaiser {
         );
         self.pending.set(true);
         self.raiser.raise();
+    }
+
+    pub fn unraise(&self) {
+        self.pending.set(false);
     }
 }
 

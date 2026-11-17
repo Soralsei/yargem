@@ -25,7 +25,7 @@ impl DMAState {
     }
 }
 
-pub struct DMAController {
+pub struct OAMController {
     bus: Rc<Bus>,
     state: DMAState,
     raiser: Raiser,
@@ -33,7 +33,7 @@ pub struct DMAController {
     listener: Cell<Option<Listener>>,
 }
 
-impl DMAController {
+impl OAMController {
     pub fn new(bus: Rc<Bus>) -> Self {
         let (raiser, listener) = signal();
         Self {
@@ -45,7 +45,7 @@ impl DMAController {
     }
 
     pub async fn task(
-        this: Rc<DMAController>,
+        this: Rc<OAMController>,
         mmu: Rc<Mmu>,
         timeline: Timeline<Cpu>,
     ) -> Infallible {
@@ -80,7 +80,7 @@ impl DMAController {
     }
 }
 
-impl MemoryHandler for DMAController {
+impl MemoryHandler for OAMController {
     fn read(&self, address: u16, _: MemoryContext<'_>) -> u8 {
         if address != 0xFF46 {
             unreachable!("Invalid read in DMAController at address 0x{:04X}", address)
@@ -125,11 +125,11 @@ mod tests {
         fn new() -> Self {
             let mut time = Time::new();
             let bus = Rc::new(Bus::new());
-            let dma = Rc::new(DMAController::new(bus.clone()));
+            let dma = Rc::new(OAMController::new(bus.clone()));
             let mut map = AddressMap::new();
             map.add((0xFF46, 0xFF46), dma.clone());
             let mmu = Rc::new(Mmu::new(map));
-            time.spawn(|t: Timeline<Cpu>| DMAController::task(dma, mmu.clone(), t));
+            time.spawn(|t: Timeline<Cpu>| OAMController::task(dma, mmu.clone(), t));
             let cpu = CpuStandIn::spawn(&mut time);
             Self {
                 time,

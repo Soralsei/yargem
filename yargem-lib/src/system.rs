@@ -8,11 +8,12 @@ use crate::cpu::cpu::{ControlLines, Cpu};
 use crate::cpu::hold::hold_line;
 use crate::debug::debugger::{Debugger, RunMode};
 use crate::debug::protocol::{BankAddr, DebugCommand, DebugEvent, RegisterSnapshot, StopReason};
-use crate::executor::Time;
-use crate::graphics::oam::DMAController;
+use crate::executor::{edge, Time};
+use crate::graphics::oam::OAMController;
 use crate::graphics::ppu::{Frame, Ppu};
 use crate::input::{Button, JoypadHandler};
 use crate::memory::bus::{Bus, CpuBus};
+use crate::memory::hdma::DMAController;
 use crate::memory::mbc::Cartridge;
 use crate::memory::mmu::{AddressMap, MemoryContext};
 use crate::mode::ConsoleMode;
@@ -129,6 +130,8 @@ impl System {
             None => PowerOn::PostBoot,
         };
 
+        eprintln!("Console mode : {:#?}", console_mode);
+
         let boot_rom = Rc::new(
             BootRom::new(boot_rom, is_cgb).map_err(|err| YargemError::BootRomMismatch(err))?,
         );
@@ -149,18 +152,21 @@ impl System {
         let joypad = Rc::new(JoypadHandler::new(interrupt_controller.request()));
 
         let bus = Rc::new(Bus::new());
-        let dma = Rc::new(DMAController::new(bus.clone()));
+        let dma = Rc::new(OAMController::new(bus.clone()));
         let (hold_req, hold_line) = hold_line();
+        let (mode0_raiser, mode0_listener) = edge();
 
         // The bus is shared: the CPU drives it, and clocked devices that move
         // bytes themselves (OAM DMA, the PPU fetcher) need a handle to it too.
         let ppu = Rc::new(Ppu::new(
             interrupt_controller.request(),
+            mode0_raiser,
             bus.clone(),
             console_mode,
             power_on,
             settings.dmg_palette,
         ));
+        let dma_controller = Rc::new(DMAController::new());
         let apu = Rc::new(Apu::new(time.fixed.clone(), is_cgb));
 
         let mut map = AddressMap::new();
@@ -206,11 +212,11 @@ impl System {
         let unmapped = Rc::new(Unmapped);
 
         let cgb_io: [(u16, u16, Rc<dyn MemoryHandler>); 5] = [
-            (0xFF4D, 0xFF4D, oscillator.clone()), //KEY1
-            (0xFF4F, 0xFF4F, ppu.clone()),        //VBK
-            (0xFF51, 0xFF55, unmapped.clone()),   // TODO HDMA1-5
-            (0xFF68, 0xFF6B, ppu.clone()),        // BCPS/BCPD/OCPS/OCPD
-            (0xFF70, 0xFF70, unmapped.clone()),   // TODO WBK
+            (0xFF4D, 0xFF4D, oscillator.clone()),     //KEY1
+            (0xFF4F, 0xFF4F, ppu.clone()),            //VBK
+            (0xFF51, 0xFF55, dma_controller.clone()), // HDMA1-5
+            (0xFF68, 0xFF6B, ppu.clone()),            // BCPS/BCPD/OCPS/OCPD
+            (0xFF70, 0xFF70, unmapped.clone()),       // TODO WBK
         ];
         for (start, end, handler) in cgb_io {
             if is_cgb {
@@ -228,10 +234,12 @@ impl System {
 
         map.add((0xFFFF, 0xFFFF), interrupt_controller.clone());
         let mmu = Rc::new(Mmu::new(map));
+        let dma_mmu = mmu.clone();
 
         time.spawn(|timeline| Ppu::task(ppu.clone(), timeline));
         time.spawn(|timeline| Serial::task(serial.clone(), timeline));
-        time.spawn(|timeline| DMAController::task(dma.clone(), mmu.clone(), timeline));
+        time.spawn(|timeline| OAMController::task(dma.clone(), mmu.clone(), timeline));
+        time.spawn(|t| DMAController::task(dma_controller, dma_mmu, hold_req, mode0_listener, t));
         time.spawn(|timeline| Timer::task(timer.clone(), timeline));
 
         time.spawn(|()| Apu::frame_sequencer_task(apu.clone(), timer.div_apu()));
