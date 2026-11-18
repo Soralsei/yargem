@@ -5,13 +5,14 @@ use crate::{
     memory::mbc::components::{CartRam, Rom, MAX_ROM_SIZE_NORMAL},
 };
 
+pub use crate::memory::mbc::components::Rtc;
 pub use crate::memory::mbc::components::RAM_BANK_SIZE;
 
-fn maybe_one_bank(bank_number: u8, mask: u8) -> u8 {
-    if bank_number & mask == 0x00 {
+fn maybe_one_bank(bank_number: u8, check_mask: u8) -> u8 {
+    if bank_number & check_mask == 0x00 {
         0x01
     } else {
-        bank_number & 0b1111
+        bank_number
     }
 }
 
@@ -22,8 +23,11 @@ pub trait Mapper {
         None
     }
     fn name(&self) -> &'static str;
-    fn ram(&mut self) -> &mut [u8] {
+    fn save_data(&mut self) -> &mut [u8] {
         &mut []
+    }
+    fn rtc(&self) -> Option<&Rtc> {
+        None
     }
 }
 
@@ -139,7 +143,7 @@ impl Mapper for Mbc1 {
     fn write(&mut self, address: u16, value: u8) {
         match address {
             0x0000..=0x1FFF => {
-                self.ram.enabled = value & 0xF == 0xA;
+                self.ram.enabled = (value & 0xF) == 0xA;
             }
             0x2000..=0x3FFF => {
                 self.rom_bank_number = value & 0b11111;
@@ -168,7 +172,7 @@ impl Mapper for Mbc1 {
         "MBC1"
     }
 
-    fn ram(&mut self) -> &mut [u8] {
+    fn save_data(&mut self) -> &mut [u8] {
         self.ram.as_mut_slice()
     }
 }
@@ -235,28 +239,102 @@ impl Mapper for Mbc2 {
 }
 
 pub struct Mbc3 {
-    rom: Vec<u8>,
-    ram: Vec<u8>,
-    ram_mask: usize,
+    rom: Rom,
+    ram: CartRam,
+    rtc: Option<Rtc>,
     // Registers
-    ram_enable: bool,
     rom_bank_number: u8,
     ram_bank_number: u8,
-    advanced_mode: bool,
 }
 
-impl Mbc3 {}
+impl Mbc3 {
+    pub fn new(rom: Vec<u8>, ram_size: usize, with_rtc: bool) -> Self {
+        Self {
+            rom: Rom::new(rom),
+            ram: CartRam::new(ram_size, false),
+            rtc: with_rtc.then_some(Rtc::new()),
+            rom_bank_number: 0,
+            ram_bank_number: 0,
+        }
+    }
+
+    fn bank1(&self) -> u8 {
+        maybe_one_bank(self.rom_bank_number, 0b11111)
+    }
+}
 
 impl Mapper for Mbc3 {
     fn read(&self, address: u16) -> u8 {
-        todo!()
+        match address {
+            0x0000..=0x3FFF => self.rom.read(0, address),
+            0x4000..=0x7FFF => self.rom.read(self.bank1() as usize, address),
+            // CartRam already reads 0xFF on disabled ram
+            0xA000..=0xBFFF if self.ram_bank_number < 8 => {
+                self.ram.read(self.ram_bank_number as usize, address)
+            }
+            // RTC register read if ram is enabled
+            0xA000..=0xBFFF if self.ram.enabled => self.rtc.as_ref().map_or(0xFF, |rtc| match self
+                .ram_bank_number
+            {
+                0x8 => rtc.seconds(),
+                0x9 => rtc.minutes(),
+                0xA => rtc.hours(),
+                0xB => rtc.days_lo(),
+                0xC => rtc.days_hi(),
+                _ => 0xFF,
+            }),
+            // floating bus read otherwise
+            0xA000..=0xBFFF => 0xFF,
+            _ => unreachable!("invalid read in Mbc3 at ${address:04}"),
+        }
     }
 
     fn write(&mut self, address: u16, value: u8) {
-        todo!()
+        match address {
+            0x0000..=0x1FFF => self.ram.enabled = (value & 0xF) == 0x0A,
+            0x2000..=0x3FFF => self.rom_bank_number = value & 0x7F,
+            0x4000..=0x5FFF => self.ram_bank_number = value & 0xF,
+            0x6000..=0x7FFF => {
+                if let Some(rtc) = self.rtc.as_ref() {
+                    rtc.maybe_latch(value);
+                }
+            }
+            // Ram write
+            0xA000..=0xBFFF if self.ram_bank_number < 8 => {
+                self.ram
+                    .write(self.ram_bank_number as usize, address, value)
+            }
+            // Rtc register write
+            0xA000..=0xBFFF if self.ram.enabled => self.rtc.as_ref().map_or((), |rtc| {
+                match self.ram_bank_number {
+                    0x8 => rtc.set_seconds(value),
+                    0x9 => rtc.set_minutes(value),
+                    0xA => rtc.set_hours(value),
+                    0xB => rtc.set_days_lo(value),
+                    0xC => rtc.set_days_hi(value),
+                    _ => (),
+                };
+            }),
+            // Do nothing otherwise
+            0xA000..=0xBFFF => (),
+            _ => unreachable!("invalid write in Mbc3 at ${address:04X}"),
+        }
+    }
+
+    fn bank_at(&self, address: u16) -> Option<u16> {
+        match address {
+            0x0000..=0x3FFF => None,
+            0x4000..=0x7FFF => Some(self.bank1() as u16),
+            0xA000..=0xBFFF => (self.ram_bank_number < 8).then_some(self.ram_bank_number as u16),
+            _ => unreachable!("unhandled bank resolution in MBC1 at address 0x{address:04X}"),
+        }
     }
 
     fn name(&self) -> &'static str {
-        todo!()
+        "MBC3"
+    }
+
+    fn rtc(&self) -> Option<&Rtc> {
+        self.rtc.as_ref()
     }
 }

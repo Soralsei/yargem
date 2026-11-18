@@ -15,7 +15,7 @@ use phf::phf_set;
 use crate::{
     is_bit_set,
     memory::{
-        mbc::{Mapper, Mbc1, Mbc2, MbcNone, RAM_BANK_SIZE},
+        mbc::{Mapper, Mbc1, Mbc2, Mbc3, MbcNone, Rtc, RAM_BANK_SIZE},
         mmu::{MemoryContext, MemoryHandler},
     },
     SizeMismatch,
@@ -43,6 +43,11 @@ fn mapper_for(mbc_type: u8, rom: Vec<u8>, ram_size: usize) -> Box<dyn Mapper> {
         0x00 => Box::new(MbcNone::new(rom, ram_size)),
         0x01..=0x03 => Box::new(Mbc1::new(rom, ram_size)),
         0x05 | 0x06 => Box::new(Mbc2::new(rom)),
+        0x0F..=0x13 => Box::new(Mbc3::new(
+            rom,
+            ram_size,
+            mbc_type == 0x0F || mbc_type == 0x10,
+        )),
         _ => panic!("unhandled MBC type ${mbc_type:02X}"),
     }
 }
@@ -82,14 +87,14 @@ impl Cartridge {
         self.cgb
     }
 
-    pub fn battery_ram(&self) -> Option<Vec<u8>> {
+    pub fn save_data(&self) -> Option<Vec<u8>> {
         self.has_battery
-            .then_some(self.mbc.borrow_mut().ram().to_vec())
+            .then_some(self.mbc.borrow_mut().save_data().to_vec())
     }
 
-    pub fn load_battery_ram(&self, data: &[u8]) -> Result<(), SizeMismatch> {
+    pub fn load_save_data(&self, data: &[u8]) -> Result<(), SizeMismatch> {
         let mut mbc = self.mbc.borrow_mut();
-        let ram = mbc.ram();
+        let ram = mbc.save_data();
 
         let expected = ram.len();
         let actual = data.len();

@@ -366,12 +366,12 @@ impl System {
     }
 
     pub fn battery_ram(&self) -> Option<Vec<u8>> {
-        self.cart.battery_ram()
+        self.cart.save_data()
     }
 
     pub fn load_battery_ram(&self, data: &[u8]) -> Result<(), YargemError> {
         self.cart
-            .load_battery_ram(data)
+            .load_save_data(data)
             .map_err(|err| YargemError::SaveMismatch(err))
     }
 
