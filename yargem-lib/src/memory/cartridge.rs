@@ -1,4 +1,7 @@
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use core::fmt;
 
@@ -15,8 +18,9 @@ use phf::phf_set;
 use crate::{
     is_bit_set,
     memory::{
-        mbc::{Mapper, Mbc1, Mbc2, Mbc3, MbcNone, Rtc, RAM_BANK_SIZE},
+        mbc::{Mapper, Mbc1, Mbc2, Mbc3, Mbc5, MbcNone, RAM_BANK_SIZE},
         mmu::{MemoryContext, MemoryHandler},
+        rtc::Rtc,
     },
     SizeMismatch,
 };
@@ -47,6 +51,11 @@ fn mapper_for(mbc_type: u8, rom: Vec<u8>, ram_size: usize) -> Box<dyn Mapper> {
             rom,
             ram_size,
             mbc_type == 0x0F || mbc_type == 0x10,
+        )),
+        0x19..=0x1E => Box::new(Mbc5::new(
+            rom,
+            ram_size,
+            (0x1Cu8..=0x1E).contains(&mbc_type),
         )),
         _ => panic!("unhandled MBC type ${mbc_type:02X}"),
     }
@@ -106,6 +115,10 @@ impl Cartridge {
         ram.copy_from_slice(data);
 
         Ok(())
+    }
+
+    pub fn rtc(&self) -> Option<Rc<Rtc>> {
+        self.mbc.borrow().rtc()
     }
 
     pub fn take_ram_dirty(&self) -> bool {

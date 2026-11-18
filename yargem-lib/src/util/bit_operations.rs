@@ -21,11 +21,3 @@ pub fn bytes_to_word(msb: u8, lsb: u8) -> u16 {
 pub fn word_to_bytes(word: u16) -> (u8, u8) {
     ((word >> 8) as u8, word as u8)
 }
-
-#[inline(always)]
-pub fn addressing_number_of_bits(mem_size: usize) -> usize {
-    if mem_size <= 1 {
-        return 0;
-    }
-    ((mem_size - 1).ilog2() + 1) as usize
-}

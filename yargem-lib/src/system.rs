@@ -2,7 +2,7 @@ use std::cell::Ref;
 use std::rc::Rc;
 
 use crate::audio::apu::Apu;
-use crate::clock::{CpuClock, Cycles, Oscillator};
+use crate::clock::{Cycles, Oscillator};
 use crate::compat::DmgCompat;
 use crate::cpu::cpu::{ControlLines, Cpu};
 use crate::cpu::hold::hold_line;
@@ -16,6 +16,8 @@ use crate::memory::bus::{Bus, CpuBus};
 use crate::memory::cartridge::Cartridge;
 use crate::memory::hdma::DMAController;
 use crate::memory::mmu::{AddressMap, MemoryContext};
+use crate::memory::rtc::Rtc;
+use crate::memory::wbk::WramMapper;
 use crate::mode::ConsoleMode;
 use crate::timer::Timer;
 use crate::YargemError;
@@ -37,20 +39,6 @@ const DEFAULT_DMG: [u16; 4] = [
     0x29A6, // 34 68 56  (r  6, g 13, b 10)
     0x1061, // 08 18 20  (r  1, g  3, b  4)
 ];
-
-/// KEY1 (0xFF4D). Both meaningful bits — current speed and the armed switch —
-/// are clock state, so the handler is a pure view onto `Clock`.
-struct SpeedSwitch(Rc<CpuClock>);
-
-impl MemoryHandler for SpeedSwitch {
-    fn read(&self, _address: u16, _ctx: MemoryContext<'_>) -> u8 {
-        self.0.key1()
-    }
-
-    fn write(&self, _address: u16, value: u8, _ctx: MemoryContext<'_>) {
-        self.0.arm(value & 1 != 0);
-    }
-}
 
 struct Unmapped;
 
@@ -209,14 +197,16 @@ impl System {
         map.add((0xFF10, 0xFF3F), apu.clone());
 
         let compat = Rc::new(DmgCompat::new(power_on));
+        let wram_mapper = Rc::new(WramMapper::new());
         let unmapped = Rc::new(Unmapped);
 
-        let cgb_io: [(u16, u16, Rc<dyn MemoryHandler>); 5] = [
+        let cgb_io: [(u16, u16, Rc<dyn MemoryHandler>); 6] = [
             (0xFF4D, 0xFF4D, oscillator.clone()),     //KEY1
             (0xFF4F, 0xFF4F, ppu.clone()),            //VBK
             (0xFF51, 0xFF55, dma_controller.clone()), // HDMA1-5
             (0xFF68, 0xFF6B, ppu.clone()),            // BCPS/BCPD/OCPS/OCPD
-            (0xFF70, 0xFF70, unmapped.clone()),       // TODO WBK
+            (0xFF70, 0xFF70, wram_mapper.clone()),    // WBK
+            (0xC000, 0xDFFF, wram_mapper),            // WRAM
         ];
         for (start, end, handler) in cgb_io {
             if is_cgb {
@@ -245,6 +235,10 @@ impl System {
         time.spawn(|()| Apu::frame_sequencer_task(apu.clone(), timer.div_apu()));
 
         time.spawn(|t| Oscillator::task(oscillator, o_line, joypad.take_input_line(), t));
+
+        if let Some(rtc) = cart.rtc() {
+            time.spawn(move |t| Rtc::task(rtc, t));
+        }
 
         let control_lines = ControlLines {
             int: interrupt_controller.take_listener(),

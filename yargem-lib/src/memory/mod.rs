@@ -3,5 +3,8 @@ pub mod bus;
 pub mod cartridge;
 pub mod hdma;
 pub mod mbc;
+mod mem;
 pub mod mmu;
+pub mod rtc;
 pub mod serial;
+pub mod wbk;

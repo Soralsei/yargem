@@ -1,12 +1,15 @@
-mod components;
+use std::rc::Rc;
 
 use crate::{
     is_bit_set,
-    memory::mbc::components::{CartRam, Rom, MAX_ROM_SIZE_NORMAL},
+    memory::{
+        mem::{CartRam, Rom, MAX_ROM_SIZE_NORMAL},
+        rtc::Rtc,
+    },
+    util::bit_operations::bytes_to_word,
 };
 
-pub use crate::memory::mbc::components::Rtc;
-pub use crate::memory::mbc::components::RAM_BANK_SIZE;
+pub use crate::memory::mem::RAM_BANK_SIZE;
 
 fn maybe_one_bank(bank_number: u8, check_mask: u8) -> u8 {
     if bank_number & check_mask == 0x00 {
@@ -26,8 +29,11 @@ pub trait Mapper {
     fn save_data(&mut self) -> &mut [u8] {
         &mut []
     }
-    fn rtc(&self) -> Option<&Rtc> {
+    fn rtc(&self) -> Option<Rc<Rtc>> {
         None
+    }
+    fn rumble_enabled(&self) -> bool {
+        false
     }
 }
 
@@ -241,7 +247,7 @@ impl Mapper for Mbc2 {
 pub struct Mbc3 {
     rom: Rom,
     ram: CartRam,
-    rtc: Option<Rtc>,
+    rtc: Option<Rc<Rtc>>,
     // Registers
     rom_bank_number: u8,
     ram_bank_number: u8,
@@ -252,7 +258,7 @@ impl Mbc3 {
         Self {
             rom: Rom::new(rom),
             ram: CartRam::new(ram_size, false),
-            rtc: with_rtc.then_some(Rtc::new()),
+            rtc: with_rtc.then_some(Rc::new(Rtc::new())),
             rom_bank_number: 0,
             ram_bank_number: 0,
         }
@@ -334,7 +340,77 @@ impl Mapper for Mbc3 {
         "MBC3"
     }
 
-    fn rtc(&self) -> Option<&Rtc> {
-        self.rtc.as_ref()
+    fn rtc(&self) -> Option<Rc<Rtc>> {
+        self.rtc.clone()
+    }
+}
+
+pub struct Mbc5 {
+    rom: Rom,
+    ram: CartRam,
+    has_rumble: bool,
+    // Registers
+    rom_bank_number_lo: u8,
+    rom_bank_number_hi: u8,
+    ram_bank_number: u8,
+}
+
+impl Mbc5 {
+    pub fn new(rom: Vec<u8>, ram_size: usize, has_rumble: bool) -> Self {
+        Self {
+            rom: Rom::new(rom),
+            ram: CartRam::new(ram_size, false),
+            has_rumble,
+            rom_bank_number_lo: 0,
+            rom_bank_number_hi: 0,
+            ram_bank_number: 0,
+        }
+    }
+
+    fn bank1(&self) -> u16 {
+        bytes_to_word(self.rom_bank_number_hi, self.rom_bank_number_lo)
+    }
+}
+
+impl Mapper for Mbc5 {
+    fn read(&self, address: u16) -> u8 {
+        match address {
+            0x0000..=0x3FFF => self.rom.read(0, address),
+            0x4000..=0x7FFF => self.rom.read(self.bank1() as usize, address),
+            0xA000..=0xBFFF => self.ram.read(self.ram_bank_number as usize, address),
+            _ => unreachable!("invalid read in Mbc3 at ${address:04}"),
+        }
+    }
+
+    fn write(&mut self, address: u16, value: u8) {
+        match address {
+            0x0000..=0x1FFF => self.ram.enabled = (value & 0xF) == 0x0A,
+            0x2000..=0x2FFF => self.rom_bank_number_lo = value,
+            0x3000..=0x3FFF => self.rom_bank_number_hi = value & 1,
+            0x4000..=0x5FFF => self.ram_bank_number = value & 0xF,
+            0x6000..=0x7FFF => {}
+            // Ram write
+            0xA000..=0xBFFF => self
+                .ram
+                .write(self.ram_bank_number as usize, address, value),
+            _ => unreachable!("invalid write in Mbc3 at ${address:04X}"),
+        }
+    }
+
+    fn bank_at(&self, address: u16) -> Option<u16> {
+        match address {
+            0x0000..=0x3FFF => None,
+            0x4000..=0x7FFF => Some(self.bank1() as u16),
+            0xA000..=0xBFFF => Some(self.ram_bank_number as u16),
+            _ => unreachable!("unhandled bank resolution in MBC1 at address 0x{address:04X}"),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "MBC5"
+    }
+
+    fn rumble_enabled(&self) -> bool {
+        self.has_rumble && is_bit_set!(self.ram_bank_number, 3)
     }
 }
