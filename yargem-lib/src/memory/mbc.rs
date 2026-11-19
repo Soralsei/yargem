@@ -53,6 +53,7 @@ impl MbcNone {
 
 impl Mapper for MbcNone {
     fn read(&self, address: u16) -> u8 {
+        eprintln!("MBCNone : ${address:04X}");
         match address {
             0x0000..=0x3FFF => self.rom.read(0, address),
             0x4000..=0x7FFF => self.rom.read(1, address),

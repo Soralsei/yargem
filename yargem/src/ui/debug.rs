@@ -104,19 +104,22 @@ pub fn controls_bar(ui: &mut Ui, engine: Option<&EngineHandle>, state: &DebugSta
                                 .map_or("".to_owned(), |b| format!("{:02X}", b) + ":"),
                             bank_addr.address
                         ),
-                        StopReason::Watchpoint(hit) => format!(
-                            "Paused - watchpoint #{} {} {}${:04X} {} -> {}",
-                            hit.id.0,
-                            match hit.access {
-                                AccessKind::Read => "read",
-                                AccessKind::Write => "write",
-                            },
-                            hit.bank
-                                .map_or("".to_owned(), |b| format!("{:02X}", b) + ":"),
-                            hit.addr,
-                            hit.old,
-                            hit.new
-                        ),
+                        StopReason::Watchpoint(hit) => {
+                            let new_label = match hit.access {
+                                AccessKind::Read => "".to_owned(),
+                                AccessKind::Write => format!(" -> {:02X}", hit.new),
+                            };
+                            format!(
+                                "Paused - watchpoint #{} {} {}${:04X} {:02X}{}",
+                                hit.id.0,
+                                hit.access,
+                                hit.bank
+                                    .map_or("".to_owned(), |b| format!("{:02X}", b) + ":"),
+                                hit.addr,
+                                hit.old,
+                                new_label,
+                            )
+                        }
                         StopReason::Step | StopReason::UserPause => {
                             format!("Paused - step at ${:04X}", regs.pc)
                         }
@@ -534,9 +537,13 @@ fn watchpoint_list(ui: &mut Ui, theme: &Theme, state: &DebugState, engine: Optio
                         (stop_row, state.last_stop.as_ref())
                     {
                         if i == row {
+                            let new_label = match at.access {
+                                AccessKind::Read => "".to_owned(),
+                                AccessKind::Write => format!(" -> {:02X}", at.new),
+                            };
                             ui.add(
                                 Badge::new(
-                                    RichText::new(format!("{:02X}->{:02X}", at.old, at.new))
+                                    RichText::new(format!("{:02X}{}", at.old, new_label))
                                         .color(theme.highlight_text),
                                 )
                                 .tone(Tone::Accent),

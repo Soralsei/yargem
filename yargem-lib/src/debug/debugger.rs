@@ -66,6 +66,7 @@ impl MemoryHandler for WatchTap {
             let set = self.set.borrow();
             if set.is_watched(address, AccessKind::Read) {
                 let bank = ctx.mmu.bank_at(address);
+                eprintln!("read value : {val:02X}");
                 if let Some(id) = set.hit(address, bank, AccessKind::Read) {
                     self.maybe_store_hit(WatchpointHit {
                         id,

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::{ops::RangeInclusive, slice::Iter};
+use std::{fmt::Display, ops::RangeInclusive, slice::Iter};
 
 use bitvec::array::BitArray;
 
@@ -11,6 +11,19 @@ pub enum AccessKind {
     #[default]
     Read,
     Write,
+}
+
+impl Display for AccessKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Read => "read",
+                Self::Write => "write",
+            }
+        )
+    }
 }
 
 #[derive(Clone)]

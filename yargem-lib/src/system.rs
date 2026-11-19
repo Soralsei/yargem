@@ -118,6 +118,7 @@ impl System {
             None => PowerOn::PostBoot,
         };
 
+        eprintln!("{cart}");
         eprintln!("Console mode : {:#?}", console_mode);
 
         let boot_rom = Rc::new(
@@ -200,13 +201,12 @@ impl System {
         let wram_mapper = Rc::new(WramMapper::new());
         let unmapped = Rc::new(Unmapped);
 
-        let cgb_io: [(u16, u16, Rc<dyn MemoryHandler>); 6] = [
+        let cgb_io: [(u16, u16, Rc<dyn MemoryHandler>); 5] = [
             (0xFF4D, 0xFF4D, oscillator.clone()),     //KEY1
             (0xFF4F, 0xFF4F, ppu.clone()),            //VBK
             (0xFF51, 0xFF55, dma_controller.clone()), // HDMA1-5
             (0xFF68, 0xFF6B, ppu.clone()),            // BCPS/BCPD/OCPS/OCPD
             (0xFF70, 0xFF70, wram_mapper.clone()),    // WBK
-            (0xC000, 0xDFFF, wram_mapper),            // WRAM
         ];
         for (start, end, handler) in cgb_io {
             if is_cgb {
@@ -221,16 +221,19 @@ impl System {
         if console_mode == ConsoleMode::DmgCompat {
             map.add((0xFF50, 0xFF50), compat);
         }
+        if is_cgb {
+            map.add((0xC000, 0xFDFF), wram_mapper) // Banked WRAM through echo ram
+        }
 
         map.add((0xFFFF, 0xFFFF), interrupt_controller.clone());
         let mmu = Rc::new(Mmu::new(map));
         let dma_mmu = mmu.clone();
 
-        time.spawn(|timeline| Ppu::task(ppu.clone(), timeline));
-        time.spawn(|timeline| Serial::task(serial.clone(), timeline));
-        time.spawn(|timeline| OAMController::task(dma.clone(), mmu.clone(), timeline));
+        time.spawn(|t| Ppu::task(ppu.clone(), t));
+        time.spawn(|t| Serial::task(serial.clone(), t));
+        time.spawn(|t| OAMController::task(dma.clone(), mmu.clone(), t));
         time.spawn(|t| DMAController::task(dma_controller, dma_mmu, hold_req, mode0_listener, t));
-        time.spawn(|timeline| Timer::task(timer.clone(), timeline));
+        time.spawn(|t| Timer::task(timer.clone(), t));
 
         time.spawn(|()| Apu::frame_sequencer_task(apu.clone(), timer.div_apu()));
 

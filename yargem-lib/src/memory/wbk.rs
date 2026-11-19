@@ -29,7 +29,7 @@ impl MemoryHandler for WramMapper {
         match address {
             0xC000..=0xCFFF => ram.read(0, address),
             0xD000..=0xDFFF => ram.read(self.bank1() as usize, address),
-            0xFF70 => self.bank.get(),
+            0xFF70 => 0xF8 | self.bank.get(),
             _ => unreachable!("invalid read in WramMapper at ${address:04X}"),
         }
     }
@@ -39,7 +39,7 @@ impl MemoryHandler for WramMapper {
         match address {
             0xC000..=0xCFFF => ram.write(0, address, value),
             0xD000..=0xDFFF => ram.write(self.bank1() as usize, address, value),
-            0xFF70 => self.bank.set(value),
+            0xFF70 => self.bank.set(value & 7),
             _ => unreachable!("invalid read in WramMapper at ${address:04X}"),
         }
     }

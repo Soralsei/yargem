@@ -41,8 +41,8 @@
 
 - [ ] MBC2, MBC3, MBC5, MBC6, MBC7 (`memory/mbc.rs`), plus unknown cartridge types currently `unimplemented!()`.
   - [X] MBC2
-  - [ ] MBC3
-  - [ ] MBC5
+  - [X] MBC3
+  - [X] MBC5
   - [ ] MBC6
   - [ ] MBC7
 

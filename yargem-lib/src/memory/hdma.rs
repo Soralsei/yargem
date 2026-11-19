@@ -3,7 +3,7 @@ use std::{cell::Cell, convert::Infallible, pin::pin, rc::Rc};
 use crate::{
     clock::{Fixed, Timeline},
     cpu::hold::HoldRequest,
-    executor::{signal, EdgeListener, Listener, Raiser},
+    executor::{edge, EdgeListener, EdgeRaiser},
     is_bit_set,
     memory::mmu::{MemoryContext, MemoryHandler, Mmu, Source},
     util::{
@@ -81,13 +81,13 @@ impl DmaState {
 pub struct DMAController {
     state: DmaState,
     // Taken by the task on spawn
-    transfer_listener: Cell<Option<Listener>>,
-    transfer_write: Raiser,
+    transfer_listener: Cell<Option<EdgeListener>>,
+    transfer_write: EdgeRaiser,
 }
 
 impl DMAController {
     pub fn new() -> Self {
-        let (raiser, listener) = signal();
+        let (raiser, listener) = edge();
         Self {
             state: DmaState::new(),
             transfer_listener: Cell::new(Some(listener)),
@@ -107,24 +107,26 @@ impl DMAController {
             .take()
             .expect("DmaController::task spawned twice");
         loop {
-            t_fixed
-                .after(
-                    transfer_listener
-                        .until(|| this.state.transfer_state.get() != TransferState::Idle),
-                )
-                .await;
+            while this.state.transfer_state.get() == TransferState::Idle {
+                t_fixed.after(transfer_listener.next()).await;
+            }
 
             if this.state.transfer_state.get() == TransferState::General {
                 t_fixed.after(hold_req.until_granted()).await;
             }
 
             // Replace with trace level logging at some point
-            // eprintln!(
-            //     "starting DMA {:#?}, src: ${:04X}, dst: ${:04X}",
-            //     this.state.transfer_state.get(),
-            //     this.state.source(),
-            //     this.state.dest()
-            // );
+            eprintln!(
+                "starting DMA {:#?}, src: ${:04X}, dst: ${:04X}, num blocks: {}",
+                this.state.transfer_state.get(),
+                this.state.source(),
+                this.state.dest(),
+                this.state.remaining.get(),
+            );
+            if this.state.dest() == 0x9C00 {
+                let vbk = mmu.read(0xFF4F, Source::Debugger);
+                eprintln!("VBK at $9C00 : ${vbk:02X}");
+            }
 
             'transfer: while this.state.remaining.get() != 0x7F {
                 if this.state.transfer_state.get() == TransferState::HBlank {
@@ -134,7 +136,7 @@ impl DMAController {
                     match which {
                         Either::Left(_) => {}
                         Either::Right(_) => {
-                            //Transfer was cancelled by the CPU
+                            //Transfer was cancelled by the CPU (or overwritten before mode0)
                             break 'transfer;
                         }
                     }
@@ -174,12 +176,10 @@ impl DMAController {
         &self,
         mode0_listener: &mut EdgeListener,
         t_fixed: &Timeline<Fixed>,
-        transfer_listener: &mut Listener,
+        transfer_listener: &mut EdgeListener,
     ) -> Either<(), ()> {
         let mode0_fut = pin!(t_fixed.after(mode0_listener.next()));
-        let cancel_fut = pin!(t_fixed.after(
-            transfer_listener.until(|| self.state.transfer_state.get() == TransferState::Idle)
-        ));
+        let cancel_fut = pin!(t_fixed.after(transfer_listener.next()));
         let which = Race::new(mode0_fut, cancel_fut).await;
         which
     }
@@ -227,16 +227,16 @@ impl MemoryHandler for DMAController {
 
                 self.state.remaining.set(value.len());
 
+                self.transfer_write.raise();
+
                 if self.state.transfer_state.get() == TransferState::HBlank
                     && value.dma_type() == TransferState::General
                 {
                     self.state.transfer_state.set(TransferState::Idle);
-                    self.transfer_write.raise();
                     return;
                 }
 
                 self.state.transfer_state.set(value.dma_type());
-                self.transfer_write.raise();
             }
             _ => unreachable!("invalid read in HdmaController at 0x{address:04X}"),
         };

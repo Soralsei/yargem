@@ -121,7 +121,6 @@ impl Mmu {
 
     pub fn ram_read(&self, addr: u16) -> u8 {
         match addr {
-            // echo ram read
             0xE000..=0xFDFF => self.memory[(addr - 0x2000) as usize].get(),
             // normal ram read
             _ => self.memory[addr as usize].get(),

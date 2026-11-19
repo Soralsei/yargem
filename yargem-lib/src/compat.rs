@@ -30,11 +30,12 @@ impl MemoryHandler for DmgCompat {
     }
 
     fn write(&self, address: u16, value: u8, context: MemoryContext<'_>) {
-        if !self.locked.get() {
-            if address == 0xFF50 {
-                self.lock();
-            }
-            context.write(address, value);
+        if self.locked.get() {
+            return;
         }
+        if address == 0xFF50 {
+            self.lock();
+        }
+        context.write(address, value);
     }
 }
