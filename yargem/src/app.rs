@@ -1,7 +1,7 @@
 #![allow(dead_code, unused_variables)]
 use std::fs;
 
-use egui::Key;
+use egui::{Key, Ui};
 use egui_file_dialog::FileDialog;
 use yargem_lib::{
     debug::protocol::{
@@ -16,7 +16,7 @@ use crate::{
     engine::{spawn_engine, EngineCommand, EngineEvent, EngineHandle},
     ui::{
         debug::{controls_bar, DebugPanel},
-        style, Screen,
+        style, MemoryViewer, Screen,
     },
 };
 
@@ -63,6 +63,7 @@ pub struct App {
     file_dialog: FileDialog,
     screen: Screen,
     debug_panel: DebugPanel,
+    memory_view: MemoryViewer,
 
     engine: Option<EngineHandle>,
     debug_state: Option<DebugState>,
@@ -85,6 +86,7 @@ impl App {
             screen: Screen::new(&ctx.egui_ctx),
             file_dialog,
             debug_panel: DebugPanel::new(),
+            memory_view: MemoryViewer::new(),
             engine: None,
             debug_state: None,
         }
@@ -95,6 +97,8 @@ impl App {
             egui::MenuBar::new().ui(ui, |ui| {
                 self.file_menu(ui, frame);
                 self.debug_menu(ui);
+                ui.separator();
+                self.view_menu(ui);
             });
         });
     }
@@ -132,6 +136,20 @@ impl App {
                         .send(EngineCommand::Debug(DebugCommand::Resume));
                 }
             })
+        });
+    }
+
+    fn view_menu(&mut self, ui: &mut Ui) {
+        ui.menu_button("View", |ui| {
+            if ui
+                .add_enabled(
+                    self.debug_state.as_ref().is_some(),
+                    egui::Button::new("Memory viewer"),
+                )
+                .clicked()
+            {
+                self.memory_view.open = !self.memory_view.open;
+            }
         });
     }
 
@@ -198,7 +216,10 @@ impl App {
                     state.paused = false;
                 }
             }
-            DebugEvent::Memory { start, bytes } => {}
+            DebugEvent::Memory { start, bytes } => {
+                self.memory_view
+                    .set_cache_data(start, bytes, self.engine.as_ref());
+            }
             DebugEvent::Registers(register_snapshot) => {
                 if let Some(state) = &mut self.debug_state {
                     state.last_regs = Some(register_snapshot);
@@ -251,12 +272,14 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.top_panel_menu(ui, frame);
 
+        let engine = self.engine.as_ref();
         if let Some(debug_state) = &mut self.debug_state {
             egui::Panel::top("controls").show(ui, |ui| {
-                controls_bar(ui, self.engine.as_ref(), debug_state);
+                controls_bar(ui, engine, debug_state);
             });
-            self.debug_panel.show(ui, self.engine.as_ref(), debug_state);
+            self.debug_panel.show(ui, engine, debug_state);
         }
+        self.memory_view.show(ui, engine, self.debug_state.as_ref());
 
         self.file_dialog.update(ui);
 

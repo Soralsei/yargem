@@ -5,4 +5,5 @@ mod screen;
 pub mod style;
 mod theme;
 
+pub use memory::MemoryViewer;
 pub use screen::*;

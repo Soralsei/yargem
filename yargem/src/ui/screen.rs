@@ -7,6 +7,7 @@ const SCREEN_SIZE: egui::Vec2 = egui::vec2(SCREEN_W as f32, SCREEN_H as f32);
 
 pub struct Screen {
     game_tex: egui::TextureHandle,
+    cleared: bool,
 }
 
 impl Screen {
@@ -17,11 +18,13 @@ impl Screen {
                 egui::ColorImage::filled([SCREEN_W, SCREEN_H], egui::Color32::BLACK),
                 egui::TextureOptions::NEAREST,
             ),
+            cleared: false,
         }
     }
     pub fn ui(&mut self, ui: &mut egui::Ui, engine: Option<&mut EngineHandle>) {
         if let Some(e) = engine {
             if e.frames.update() {
+                self.cleared = false;
                 let pixels = e
                     .frames
                     .output_buffer()
@@ -38,8 +41,11 @@ impl Screen {
                 self.game_tex.set(image, egui::TextureOptions::NEAREST);
             }
         } else {
-            let image = egui::ColorImage::filled([SCREEN_W, SCREEN_H], egui::Color32::BLACK);
-            self.game_tex.set(image, egui::TextureOptions::NEAREST);
+            if !self.cleared {
+                let image = egui::ColorImage::filled([SCREEN_W, SCREEN_H], egui::Color32::BLACK);
+                self.game_tex.set(image, egui::TextureOptions::NEAREST);
+                self.cleared = true;
+            }
         }
 
         let scale = (ui.available_size() / SCREEN_SIZE)

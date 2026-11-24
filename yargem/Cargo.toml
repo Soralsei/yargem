@@ -19,3 +19,4 @@ anyhow = "1.0.104"
 egui-file-dialog = "0.15.0"
 serde = { version = "1.0.229", features = ["derive"] }
 egui-phosphor = { version = "0.14.0", features = ["bold"] }
+egui_extras = "0.37.0"
